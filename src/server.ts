@@ -154,7 +154,12 @@ app.post("/api/incident", (req, res) => {
     knownContext: String(b.knownContext ?? "").trim(),
   });
 
-  for (const w of roster) store.addWitness(incident.id, w.displayName, w.phoneNumber);
+  // A roster witness with no number still gets one when a demo fallback is
+  // configured, so "Call witness" is usable without retyping it every time.
+  const fallback = process.env.DEMO_WITNESS_PHONE?.trim() ?? "";
+  for (const w of roster) {
+    store.addWitness(incident.id, w.displayName, w.phoneNumber || fallback);
+  }
 
   res.json({ incident, witnesses: roster.length });
 });
@@ -229,7 +234,12 @@ app.post("/api/simulate", async (req, res) => {
 
 app.post("/api/reset", (_req, res) => {
   store.reset();
-  createDemoIncident();
+  const incident = createDemoIncident();
+  const fallback = process.env.DEMO_WITNESS_PHONE?.trim();
+  if (fallback) {
+    store.addWitness(incident.id, "Witness A", fallback);
+    store.addWitness(incident.id, "Witness B", fallback);
+  }
   res.json({ ok: true });
 });
 

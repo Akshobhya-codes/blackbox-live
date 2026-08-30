@@ -1,0 +1,46 @@
+{
+  "name": "blackbox",
+  "version": "1.0.0",
+  "description": "BlackBox — every witness has a piece. BlackBox builds the timeline.",
+  "type": "module",
+  "scripts": {
+    "prestart": "vite build",
+    "start": "tsx src/server.ts",
+    "predev": "vite build",
+    "dev": "concurrently -k -n ui,api -c cyan,green npm:ui npm:dev:api",
+    "dev:api": "tsx watch src/server.ts",
+    "ui": "vite build --watch",
+    "build": "vite build",
+    "chat": "tsx src/agent-cli.ts --chat",
+    "roleplay": "tsx src/agent-cli.ts --roleplay",
+    "webrtc": "tsx src/agent-cli.ts --webrtc",
+    "selftest": "tsx src/selftest.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "guava",
+    "voice-ai",
+    "incident",
+    "investigation"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@guava-ai/guava-sdk": "^0.33.0",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.4.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "@vitejs/plugin-react": "^6.1.1",
+    "concurrently": "^10.0.5",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3",
+    "vite": "^8.2.2"
+  }
+}

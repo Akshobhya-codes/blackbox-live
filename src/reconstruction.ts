@@ -146,24 +146,136 @@ export async function analyzeCase(): Promise<void> {
   const incident = store.getIncident();
   if (!incident) return;
 
-  const claims = await extractAll(incident);
+  // Paint first, think later.
+  //
+  // The rules engine is pure local computation and finishes in milliseconds,
+  // so the timeline and the contradictions land the instant the caller hangs
+  // up. Everything that touches a network — the model pass, the public-record
+  // search, the written report — runs behind this and pushes its own update
+  // when it arrives. Nothing an investigator needs to see is ever waiting on
+  // a web request.
+  analyzeCaseFast();
 
-  // Public context is fetched once per case, and never on the critical path.
-  // Live retrieval can take the better part of a minute; the investigator must
-  // see the new testimony land on the timeline immediately, not wait on a web
-  // search. Sources stream in afterwards and push their own update.
-  const sources = store.getState().externalSources;
-  if (sources.length === 0 && !researchInFlight) {
-    researchInFlight = true;
-    void researchContext(incident)
-      .catch((err) => console.warn("[reconstruction] research failed:", (err as Error).message))
-      .finally(() => {
-        researchInFlight = false;
-      });
+  void enrich(incident).catch((err) =>
+    console.warn("[reconstruction] enrichment failed:", (err as Error).message),
+  );
+}
+
+/**
+ * Everything slow, off the critical path.
+ *
+ * The model pass and the public-record search run concurrently rather than in
+ * sequence: waiting a minute for a web search before even starting the model
+ * meant neither landed while anyone was still looking. Research pushes its own
+ * update when it arrives, and the claims are re-checked against it then.
+ */
+async function enrich(incident: Incident): Promise<void> {
+  if (enriching) return;
+  enriching = true;
+  try {
+    const claims = collectClaims(incident);
+
+    // Fire retrieval off and let it land whenever it lands.
+    //
+    // Only the weather record on the live path. Everything shares one MCP
+    // session, so requests queue behind each other — and of the sources
+    // available, the observation is the only one that can settle a claim
+    // rather than merely inform it. The broader search belongs to the batch
+    // reconstruction, where a minute of waiting is acceptable.
+    if (store.getState().externalSources.length === 0 && !researchInFlight) {
+      researchInFlight = true;
+      void verifyConditions(incident)
+        .then((sources) => {
+          if (sources.length === 0) return;
+          // Re-check every claim against the record that just arrived. Cheap,
+          // local, and it is what turns a disputed claim into one contradicted
+          // by external evidence.
+          const s = store.getState();
+          store.applyAnalysis(
+            classify(s.claims, s.findings, sources),
+            s.findings,
+            s.timeline,
+            s.reconciliation.engine,
+          );
+        })
+        .catch((err) => console.warn("[reconstruction] research failed:", (err as Error).message))
+        .finally(() => {
+          researchInFlight = false;
+        });
+    }
+
+    await reconcileAll(incident, claims, store.getState().externalSources);
+    await writeReport(incident);
+  } finally {
+    enriching = false;
+  }
+}
+
+/** One enrichment pass at a time; a second call would redo the same work. */
+let enriching = false;
+
+/**
+ * Retrieves just the weather observation for the incident hour.
+ *
+ * This is the live-path counterpart to the full research pass: one request,
+ * and the only source that can mark a claim supported or contradicted by
+ * external evidence rather than simply disputed by another person.
+ */
+async function verifyConditions(incident: Incident): Promise<ExternalSource[]> {
+  // Runs regardless of Bright Data: the record is worth having either way,
+  // and the source records which path retrieved it.
+
+  const id = act("evidence_researcher", "Checking conditions against an independent record", {
+    status: "running",
+    via: "brightdata:scrape_as_markdown",
+  });
+
+  const w = await fetchWeather(incident.location, incident.approximateTime);
+  if (!w) {
+    store.finishAction(id, "done", "No weather record retrieved; conditions stay unverified.");
+    return [];
   }
 
-  await reconcileAll(incident, claims, sources);
-  await writeReport(incident);
+  const saved = store.addExternalSource({
+    incidentId: incident.id,
+    title: `Weather observation — ${cityLabel(incident.location)} at ${w.observedAt}`,
+    url: w.sourceUrl,
+    snippet:
+      w.description +
+      (w.tempC !== null ? `, ${w.tempC} C` : "") +
+      (w.visibilityKm !== null ? `, visibility ${w.visibilityKm} km` : "") +
+      (w.precipMM !== null ? `, precipitation ${w.precipMM} mm` : ""),
+    category: "weather",
+    retrievedAt: new Date().toISOString(),
+    relevance:
+      "Independent record of conditions at the reported time. What participants said about " +
+      "weather and road surface is checked against this.",
+    relatedClaimIds: [],
+    bearing: "context",
+    provider: w.via,
+    factKey: "weather.condition",
+    factValue: w.condition,
+  });
+
+  store.finishAction(
+    id,
+    "done",
+    `Record for ${w.observedAt}: ${w.description}. Conditions claims now checked against it.`,
+  );
+  return [saved];
+}
+
+/** Extraction with no pacing and no logging — used on the live path. */
+function collectClaims(incident: Incident): Claim[] {
+  const claims: Claim[] = [];
+  for (const interview of store.usableInterviews()) {
+    try {
+      claims.push(...extractClaims(interview, incident, interview.witnessId));
+    } catch (err) {
+      console.error(`[reconstruction] extraction failed for ${interview.id}:`, err);
+    }
+  }
+  return claims;
 }
 
 /** Guards against two calls racing the same one-time research pass. */
@@ -318,6 +430,12 @@ async function interviewOne(
   });
 }
 
+/** Short place name for a source title. */
+function cityLabel(location: string): string {
+  const parts = location.split(",").map((p) => p.trim()).filter(Boolean);
+  return parts[parts.length - 1] || location;
+}
+
 // --------------------------------------------------------------------- claims
 
 async function extractAll(incident: Incident): Promise<Claim[]> {
@@ -397,10 +515,43 @@ async function researchContext(incident: Incident): Promise<ExternalSource[]> {
 
   let sources: Omit<ExternalSource, "id">[] = [];
   if (brightdata.brightDataConfigured()) {
-    try {
-      sources = await brightdata.research(plan, incident.id);
-    } catch (err) {
-      console.warn("[reconstruction] Bright Data failed:", (err as Error).message);
+    // The weather observation is the only source that can settle a claim
+    // outright, so it is fetched alongside the searches rather than queued
+    // behind them. Two searches, not five: each round-trip costs real seconds
+    // and the marginal page adds little an investigator will read.
+    const [searched, wx] = await Promise.allSettled([
+      brightdata.research(plan.slice(0, 2), incident.id),
+      Promise.race([
+        fetchWeather(incident.location, incident.approximateTime),
+        new Promise<null>((r) => setTimeout(() => r(null), 30_000)),
+      ]),
+    ]);
+
+    if (searched.status === "fulfilled") sources = searched.value;
+    else console.warn("[reconstruction] Bright Data search failed:", searched.reason);
+
+    if (wx.status === "fulfilled" && wx.value) {
+      const w = wx.value;
+      sources.unshift({
+        incidentId: incident.id,
+        title: `Weather observation — ${cityLabel(incident.location)} at ${w.observedAt}`,
+        url: w.sourceUrl,
+        snippet:
+          w.description +
+          (w.tempC !== null ? `, ${w.tempC} C` : "") +
+          (w.visibilityKm !== null ? `, visibility ${w.visibilityKm} km` : "") +
+          (w.precipMM !== null ? `, precipitation ${w.precipMM} mm` : ""),
+        category: "weather",
+        retrievedAt: new Date().toISOString(),
+        relevance:
+          "Independent record of conditions at the reported time. Witness answers about " +
+          "weather and road surface are checked against this.",
+        relatedClaimIds: [],
+        bearing: "context",
+        provider: "brightdata:scrape_as_markdown",
+        factKey: "weather.condition",
+        factValue: w.condition,
+      });
     }
   }
 
@@ -413,35 +564,6 @@ async function researchContext(incident: Incident): Promise<ExternalSource[]> {
       relatedClaimIds: [],
       retrievedAt: new Date().toISOString(),
     }));
-  }
-
-  // An independent observation for the hour of the incident. This is the
-  // one source that can settle a claim outright rather than just inform it,
-  // so it carries a factKey the reconciler checks answers against.
-  if (brightdata.brightDataConfigured()) {
-    const wx = await fetchWeather(incident.location, incident.approximateTime);
-    if (wx) {
-      sources.push({
-        incidentId: incident.id,
-        title: `Weather observation — ${incident.location.split(",").pop()?.trim()} at ${wx.observedAt}`,
-        url: wx.sourceUrl,
-        snippet:
-          `${wx.description}` +
-          (wx.tempC !== null ? `, ${wx.tempC} C` : "") +
-          (wx.visibilityKm !== null ? `, visibility ${wx.visibilityKm} km` : "") +
-          (wx.precipMM !== null ? `, precipitation ${wx.precipMM} mm` : ""),
-        category: "weather",
-        retrievedAt: new Date().toISOString(),
-        relevance:
-          `Independent record of conditions at the reported time. Witness answers ` +
-          `about weather and road surface are checked against this.`,
-        relatedClaimIds: [],
-        bearing: "context",
-        provider: "brightdata:scrape_as_markdown",
-        factKey: "weather.condition",
-        factValue: wx.condition,
-      });
-    }
   }
 
   const saved = sources.map((s) => store.addExternalSource(s));
@@ -596,7 +718,7 @@ function whoToAsk(
  * corroborating / conflicting / external links behind it. Nothing here decides
  * truth — it records how each claim stands against the other accounts.
  */
-function classify(
+export function classify(
   claims: Claim[],
   findings: { type: string; sourceClaimIds: string[] }[],
   sources: ExternalSource[],

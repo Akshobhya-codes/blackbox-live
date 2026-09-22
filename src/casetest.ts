@@ -6,8 +6,9 @@
 
 import { extractClaims } from "./extract.ts";
 import { reconcile } from "./reconcile.ts";
+import { classify } from "./reconstruction.ts";
 import { BB204_CASE, BB204_PARTICIPANTS } from "./cases/bb204.ts";
-import type { Claim, Incident, Interview, Witness } from "./types.ts";
+import type { Claim, ExternalSource, Incident, Interview, Witness } from "./types.ts";
 
 const incident: Incident = {
   id: "inc_bb204",
@@ -75,6 +76,34 @@ for (const e of timeline) {
   console.log(`  ${e.rank}. ${e.label.padEnd(28)} [${e.confidence}]`);
 }
 
+
+// An independent weather record is the one source that can settle a claim
+// outright rather than leave it as one person's word against another's.
+// Ethan recalls rain and a wet road; Maya and Daniel recall it dry. The
+// observation decides which recollections hold up on that point - and being
+// mistaken about the weather is not the same as being untruthful, so the
+// strongest verdict available stays "contradicted by external evidence".
+const weatherRecord: ExternalSource = {
+  id: "src_weather",
+  incidentId: incident.id,
+  title: "Weather observation",
+  url: "https://wttr.in/San%20Francisco?format=j1",
+  snippet: "Patchy rain nearby",
+  category: "weather",
+  retrievedAt: new Date().toISOString(),
+  relevance: "Conditions at the reported hour.",
+  relatedClaimIds: [],
+  bearing: "context",
+  provider: "brightdata:scrape_as_markdown",
+  factKey: "weather.condition",
+  factValue: "rain",
+};
+
+const verified = classify(claims, findings, [weatherRecord]);
+const weatherClaims = verified.filter(
+  (c) => c.subject === "weather" && c.predicate === "condition",
+);
+
 const checks: { name: string; ok: boolean }[] = [
   {
     name: "HEADLINE: 'These accounts cannot all be true' (both drivers green)",
@@ -115,6 +144,24 @@ const checks: { name: string; ok: boolean }[] = [
     ok: findings
       .filter((f) => f.type !== "open_question")
       .every((f) => f.sourceClaimIds.length > 0),
+  },
+  {
+    name: "weather record settles conditions claims either way",
+    ok:
+      weatherClaims.length >= 2 &&
+      weatherClaims.some(
+        (c) => c.object === "rain" && c.classification === "supported_by_external_evidence",
+      ) &&
+      weatherClaims.some(
+        (c) =>
+          c.object === "clear" && c.classification === "contradicted_by_external_evidence",
+      ),
+  },
+  {
+    name: "a verified claim cites the source that settled it",
+    ok: weatherClaims
+      .filter((c) => c.classification?.endsWith("_by_external_evidence"))
+      .every((c) => c.externalEvidenceIds?.includes("src_weather")),
   },
   {
     name: "no finding accuses anyone of lying",

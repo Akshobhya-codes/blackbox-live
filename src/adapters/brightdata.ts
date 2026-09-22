@@ -177,48 +177,68 @@ function titleFrom(markdown: string, fallback: string): string {
  * A request that yields nothing contributes no source; the caller decides
  * whether to fall back to fixtures.
  */
+/**
+ * Caps a retrieval so one slow page cannot hold up the rest.
+ *
+ * Individual requests here have been observed taking over a minute. An
+ * investigator watching a live board will not wait that long, and a source
+ * that arrives after they have moved on is worth nothing.
+ */
+function withDeadline<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
 export async function research(
   requests: ResearchRequest[],
   incidentId: string,
 ): Promise<Omit<ExternalSource, "id">[]> {
-  const out: Omit<ExternalSource, "id">[] = [];
+  // Requests run together, not one after another. Serially these took longer
+  // than the whole rest of the analysis combined.
+  const settled = await Promise.allSettled(
+    requests.map(async (req) => {
+      const base = {
+        incidentId,
+        category: req.category,
+        retrievedAt: new Date().toISOString(),
+        relevance: req.relevance,
+        relatedClaimIds: [] as string[],
+        bearing: req.bearing,
+      };
 
-  for (const req of requests) {
-    const base = {
-      incidentId,
-      category: req.category,
-      retrievedAt: new Date().toISOString(),
-      relevance: req.relevance,
-      relatedClaimIds: [] as string[],
-      bearing: req.bearing,
-    };
+      const hits = await withDeadline(search(req.query, 1), 20_000, [] as SearchHit[]);
+      if (hits.length > 0 && hits[0].url) {
+        return {
+          ...base,
+          title: hits[0].title,
+          url: hits[0].url,
+          snippet: hits[0].snippet || "(no snippet returned)",
+          provider: "brightdata:search_engine",
+        };
+      }
 
-    const hits = await search(req.query, 1);
-    if (hits.length > 0 && hits[0].url) {
-      out.push({
+      if (!req.url) return null;
+      const markdown = await withDeadline(scrape(req.url), 20_000, "");
+      if (!markdown.trim()) return null;
+
+      return {
         ...base,
-        title: hits[0].title,
-        url: hits[0].url,
-        snippet: hits[0].snippet || "(no snippet returned)",
-        provider: "brightdata:search_engine",
-      });
-      continue;
-    }
+        title: titleFrom(markdown, req.title ?? req.url),
+        url: req.url,
+        snippet: snippetFrom(markdown),
+        provider: "brightdata:scrape_as_markdown",
+      };
+    }),
+  );
 
-    if (!req.url) continue;
-    const markdown = await scrape(req.url);
-    if (!markdown.trim()) continue;
-
-    out.push({
-      ...base,
-      title: titleFrom(markdown, req.title ?? req.url),
-      url: req.url,
-      snippet: snippetFrom(markdown),
-      provider: "brightdata:scrape_as_markdown",
-    });
-  }
-
-  return out;
+  return settled
+    .filter(
+      (r): r is PromiseFulfilledResult<Omit<ExternalSource, "id">> =>
+        r.status === "fulfilled" && r.value !== null,
+    )
+    .map((r) => r.value);
 }
 
 export async function shutdown(): Promise<void> {

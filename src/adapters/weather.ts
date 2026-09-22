@@ -23,6 +23,8 @@ export interface WeatherRecord {
   dark: boolean | null;
   observedAt: string;
   sourceUrl: string;
+  /** Which path actually served it, so provenance stays honest. */
+  via: "brightdata:scrape_as_markdown" | "direct";
 }
 
 /** Maps a provider's prose description onto our canonical vocabulary. */
@@ -83,21 +85,22 @@ export async function fetchWeather(
   const city = cityOf(location);
   const url = `https://wttr.in/${encodeURIComponent(city)}?format=j1`;
 
-  const raw = await scrape(url);
-  if (!raw.trim()) return null;
+  // Bright Data first, so the retrieval goes through the same egress as the
+  // rest of our public-record work. It shares one MCP session with the search
+  // plan though, and a contended session can take longer than an investigator
+  // will wait — so a direct read backs it up. Whichever served it is recorded
+  // on the source rather than glossed over.
+  let data: WttrPayload | null = null;
+  let via: WeatherRecord["via"] = "brightdata:scrape_as_markdown";
 
-  // The scraper returns markdown, which escapes underscores in JSON keys.
-  const cleaned = raw.replace(/\\_/g, "_").replace(/\\\*/g, "*");
-  const start = cleaned.indexOf("{");
-  const end = cleaned.lastIndexOf("}");
-  if (start < 0 || end <= start) return null;
+  const raw = await scrape(url).catch(() => "");
+  if (raw.trim()) data = parsePayload(raw);
 
-  let data: WttrPayload;
-  try {
-    data = JSON.parse(cleaned.slice(start, end + 1)) as WttrPayload;
-  } catch {
-    return null;
+  if (!data) {
+    via = "direct";
+    data = await fetchDirect(url);
   }
+  if (!data) return null;
 
   const hour = hourOf(approximateTime);
   const slot = pickHour(data, hour);
@@ -115,7 +118,45 @@ export async function fetchWeather(
     dark: hour === null ? null : hour >= 19 || hour <= 6,
     observedAt: hour === null ? "current observation" : `${String(hour).padStart(2, "0")}:00`,
     sourceUrl: url,
+    via,
   };
+}
+
+/**
+ * Parses the provider's JSON out of scraped markdown.
+ *
+ * The scraper backslash-escapes punctuation that JSON needs literally —
+ * `"current\_condition"` and `\[` both appear. Only markdown's own escapes are
+ * stripped; JSON's `\"` and `\\` are left alone or valid strings break.
+ */
+function parsePayload(raw: string): WttrPayload | null {
+  const cleaned = raw.replace(/\\([_[\]*`~#+\-.!])/g, "$1");
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  try {
+    return JSON.parse(cleaned.slice(start, end + 1)) as WttrPayload;
+  } catch {
+    return null;
+  }
+}
+
+/** Plain HTTPS read, used when the proxied path is slow or unparseable. */
+async function fetchDirect(url: string): Promise<WttrPayload | null> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 12_000);
+  try {
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: { "User-Agent": "curl/8" }, // wttr.in serves JSON to curl-ish agents
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as WttrPayload;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** The hourly slot nearest the incident, falling back to current conditions. */

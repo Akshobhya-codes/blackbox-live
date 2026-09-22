@@ -396,7 +396,7 @@ function scheduleLiveAnalysis(): void {
     import("./reconstruction.ts")
       .then((m) => m.analyzeCaseFast())
       .catch((err) => console.warn("[agent] live analysis skipped:", (err as Error).message));
-  }, 1500);
+  }, 900);
 }
 
 agent.onCallerSpeech(async (call, event) => {

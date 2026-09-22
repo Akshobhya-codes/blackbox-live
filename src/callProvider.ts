@@ -14,7 +14,10 @@ import { BB204_PARTICIPANTS } from "./cases/bb204.ts";
 export type ProviderKind = "demo" | "guava";
 
 export function activeProvider(): ProviderKind {
-  const forced = (process.env.DEMO_MODE ?? "true").toLowerCase() !== "false";
+  // Live by default. A configured Guava number means real calls; the
+  // simulator is only for running without a phone line, and has to be asked
+  // for explicitly with DEMO_MODE=true.
+  const forced = (process.env.DEMO_MODE ?? "false").toLowerCase() === "true";
   if (forced) return "demo";
   return process.env.GUAVA_AGENT_NUMBER?.trim() ? "guava" : "demo";
 }

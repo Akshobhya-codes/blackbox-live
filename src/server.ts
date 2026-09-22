@@ -17,11 +17,12 @@ import { brightDataConfigured } from "./adapters/brightdata.ts";
 import * as brain from "./adapters/brain.ts";
 import { llmConfigured } from "./llm.ts";
 import { isPlausiblePhone, maskPhone } from "./normalize.ts";
+import { fetchRecentCases } from "./adapters/datasf.ts";
 import { CASE_TYPES, type IntegrationStatus, type ParticipantRole } from "./types.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 3000);
-const DEMO_MODE = (process.env.DEMO_MODE ?? "true").toLowerCase() !== "false";
+const DEMO_MODE = (process.env.DEMO_MODE ?? "false").toLowerCase() === "true";
 
 const app = express();
 app.use(express.json({ limit: "4mb" }));
@@ -32,25 +33,31 @@ app.use(express.static(resolve(__dirname, "..", "public")));
 // ---------------------------------------------------------------------------
 function viewState() {
   const s = store.getState();
+  // Everything below is scoped to the open case. Other investigations stay
+  // in the library and never bleed into this one's findings.
+  const caseId = store.getIncident()?.id ?? null;
+  const mine = <T extends { incidentId: string }>(xs: T[]) =>
+    caseId ? xs.filter((x) => x.incidentId === caseId) : [];
   return {
+    cases: store.listCases(),
     demoMode: DEMO_MODE,
-    incident: s.incidents[0] ?? null,
-    participants: s.witnesses.map((w) => ({
+    incident: store.getIncident(),
+    participants: mine(s.witnesses).map((w) => ({
       ...w,
       phoneNumber: undefined,
       phoneMasked: w.phoneNumber ? maskPhone(w.phoneNumber) : null,
       hasPhone: Boolean(w.phoneNumber),
     })),
-    interviews: s.interviews,
+    interviews: mine(s.interviews),
     // Narrative-position claims are internal ordering evidence, not findings.
-    claims: s.claims.filter((c) => c.category !== "narrative"),
-    findings: s.findings,
-    timeline: s.timeline,
-    evidence: s.evidence,
-    externalSources: s.externalSources,
-    agentActions: s.agentActions.slice(-120),
-    followUps: s.followUps,
-    report: s.report,
+    claims: mine(s.claims).filter((c) => c.category !== "narrative"),
+    findings: mine(s.findings),
+    timeline: mine(s.timeline),
+    evidence: mine(s.evidence),
+    externalSources: mine(s.externalSources),
+    agentActions: mine(s.agentActions).slice(-120),
+    followUps: mine(s.followUps),
+    report: s.report && s.report.incidentId === caseId ? s.report : null,
     reconstruction: s.reconstruction,
     reconciliation: s.reconciliation,
   };
@@ -118,8 +125,8 @@ app.get("/api/health", async (_req, res) => {
     },
     {
       name: "Voice",
-      mode: activeProvider() === "guava" ? "live" : "demo",
-      detail: providerDetail(),
+      mode: activeProvider() === "guava" && !voiceError ? "live" : "demo",
+      detail: voiceError ? `Guava failed to start: ${voiceError}` : providerDetail(),
     },
     {
       name: "LLM analysis",
@@ -143,12 +150,61 @@ app.post("/api/demo/reset", (_req, res) => {
   res.json({ ok: true, incident });
 });
 
+app.get("/api/cases", (_req, res) => res.json({ cases: store.listCases() }));
+
+/**
+ * Opens real, recent SF injury collisions as cases so the library reflects
+ * live workload rather than fixtures. Imported cases start with no roster —
+ * the register carries no personal data and BlackBox invents no participants.
+ */
+app.post("/api/cases/import", async (req, res) => {
+  const limit = Math.min(Math.max(Number(req.body?.limit ?? 6), 1), 20);
+  const found = await fetchRecentCases(limit);
+  if (found.length === 0) {
+    return res.status(502).json({
+      error: "DataSF returned no cases. The portal may be unreachable right now.",
+    });
+  }
+
+  // Importing fills the library; it must not yank the investigator out of the
+  // case they are working on.
+  const wasOpen = store.getIncident()?.id ?? null;
+  const existing = new Set(store.listCases().map((c) => c.referenceId));
+  let created = 0;
+  for (const item of found) {
+    if (existing.has(item.draft.referenceId)) continue;
+    const inc = store.createIncident(item.draft);
+    store.logAction({
+      incidentId: inc.id,
+      agent: "orchestrator",
+      summary: `Case ${inc.referenceId} imported from DataSF`,
+      detail: `${inc.location}. Register entry only — no statements taken yet.`,
+      status: "done",
+      via: "datasf:ubvf-ztfx",
+    });
+    created++;
+  }
+  if (wasOpen) store.setActiveCase(wasOpen);
+  res.json({ ok: true, created, found: found.length });
+});
+
+app.post("/api/cases/:id/open", (req, res) => {
+  const inc = store.setActiveCase(req.params.id);
+  if (!inc) return res.status(404).json({ error: "unknown case" });
+  res.json({ ok: true, incident: inc });
+});
+
+app.delete("/api/cases/:id", (req, res) => {
+  const ok = store.deleteCase(req.params.id);
+  if (!ok) return res.status(404).json({ error: "unknown case" });
+  res.json({ ok: true });
+});
+
 app.post("/api/case", (req, res) => {
   const b = req.body ?? {};
   const title = String(b.title ?? "").trim();
   if (title.length < 3) return res.status(400).json({ error: "A case title is required" });
 
-  store.reset();
   const incident = store.createIncident({
     title,
     type: String(b.type ?? "Police investigation").trim(),
@@ -252,8 +308,35 @@ app.get("/api/report.md", (_req, res) => {
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Phone line
+//
+// Loaded dynamically because the Guava SDK throws at construction when no
+// credentials are present, and a missing key must never stop the dashboard.
+// ---------------------------------------------------------------------------
+let voiceError: string | null = null;
+
+async function startVoice(): Promise<void> {
+  if (activeProvider() !== "guava") {
+    console.log("[voice] simulator mode — no phone line opened");
+    return;
+  }
+  try {
+    const agent = await import("./agent.ts");
+    agent.startInboundListener();
+  } catch (err) {
+    voiceError = (err as Error).message;
+    console.warn(
+      "\n[voice] Guava agent NOT started — inbound calling is off.\n" +
+        `        reason: ${voiceError}\n` +
+        "        The dashboard and analysis still work.\n",
+    );
+  }
+}
+
 const server = app.listen(PORT, () => {
   if (!store.getIncident()) seedDemoCase();
+  void startVoice();
   console.log(`\n  BLACKBOX  ·  http://localhost:${PORT}`);
   console.log(`  Autonomous incident reconstruction`);
   console.log(`  demo mode: ${DEMO_MODE ? "on" : "off"} · voice: ${providerDetail()}\n`);

@@ -23,7 +23,7 @@ export function subscribe(
     es.onerror = () => {
       onStatus(false);
       es?.close();
-      // The demo must survive a dropped stream.
+      // A dropped stream must never require a page reload mid-interview.
       retry = window.setTimeout(open, 2000);
     };
   };
@@ -36,13 +36,19 @@ export function subscribe(
   };
 }
 
-export async function post<T = unknown>(path: string, body?: unknown): Promise<T> {
+export async function post<T = unknown>(
+  path: string,
+  body?: unknown,
+  method: "POST" | "DELETE" | "PATCH" = "POST",
+): Promise<T> {
   const res = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+    method,
+    headers: body ? { "Content-Type": "application/json" } : undefined,
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((data as { error?: string }).error || `Request failed (${res.status})`);
+  if (!res.ok) {
+    throw new Error((data as { error?: string }).error || `Request failed (${res.status})`);
+  }
   return data as T;
 }

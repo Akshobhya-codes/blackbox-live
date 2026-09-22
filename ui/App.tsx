@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import Timeline from "./components/Timeline";
 import Contradictions from "./components/Contradictions";
+import CaseLibrary from "./components/CaseLibrary";
 import {
   ActivityFeed,
   EvidenceView,
@@ -15,9 +16,10 @@ import { counts, participantMeta } from "./lib/view";
 import { EMPTY_STATE, type AppState, type Finding, type IntegrationStatus, type Participant } from "./lib/types";
 import "./styles.css";
 
-type Tab = "overview" | "timeline" | "contradictions" | "evidence" | "report";
+type Tab = "cases" | "overview" | "timeline" | "contradictions" | "evidence" | "report";
 
 const TABS: { id: Tab; label: string }[] = [
+  { id: "cases", label: "Cases" },
   { id: "overview", label: "Overview" },
   { id: "timeline", label: "Timeline" },
   { id: "contradictions", label: "Contradictions" },
@@ -33,6 +35,7 @@ export default function App() {
   const [selected, setSelected] = useState<Finding | null>(null);
   const [transcript, setTranscript] = useState<Participant | null>(null);
   const [integrations, setIntegrations] = useState<IntegrationStatus[]>([]);
+  const [voiceLine, setVoiceLine] = useState<string | null>(null);
   const [toast, setToast] = useState<{ text: string; err?: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -41,7 +44,15 @@ export default function App() {
   const loadHealth = useCallback(() => {
     fetch("/api/health")
       .then((r) => r.json())
-      .then((d) => setIntegrations(d.integrations ?? []))
+      .then((d) => {
+        setIntegrations(d.integrations ?? []);
+        const v = (d.integrations ?? []).find(
+          (i: IntegrationStatus) => i.name === "Voice" && i.mode === "live",
+        );
+        // The detail reads 'Guava voice agent on +1...'; pull the number out.
+        const m = v ? /\+\d[\d\s().-]{6,}/.exec(v.detail) : null;
+        setVoiceLine(m ? m[0].trim() : null);
+      })
       .catch(() => setIntegrations([]));
   }, []);
   useEffect(loadHealth, [loadHealth]);
@@ -93,6 +104,27 @@ export default function App() {
     }
   };
 
+  const openCase = async (id: string) => {
+    try {
+      await post(`/api/cases/${id}/open`);
+      setSelected(null);
+      setFocus(null);
+      setTab("overview");
+      notify("Case opened");
+    } catch (e) {
+      notify((e as Error).message, true);
+    }
+  };
+
+  const callParticipant = async (id: string, name: string) => {
+    try {
+      await post(`/api/participant/${id}/call`);
+      notify(`Calling ${name}…`);
+    } catch (e) {
+      notify((e as Error).message, true);
+    }
+  };
+
   const askNext = async (id: string) => {
     try {
       const r = await post<{ question: string }>(`/api/followups/${id}/prioritise`);
@@ -129,6 +161,16 @@ export default function App() {
           />
         </div>
 
+        {voiceLine && (
+          <div className="live-line" title="Witnesses call this number to give a statement">
+            <span className="live-dot-pulse" />
+            <div>
+              <div className="live-line-l">LINE LIVE — witnesses call</div>
+              <div className="live-line-n">{voiceLine}</div>
+            </div>
+          </div>
+        )}
+
         <div className="top-actions">
           <button className="btn-launch" onClick={launch} disabled={busy || live}>
             {live ? "Reconstructing…" : "Launch Reconstruction"}
@@ -158,6 +200,7 @@ export default function App() {
           focus={focus}
           onFocus={setFocus}
           onTranscript={setTranscript}
+          onCall={callParticipant}
         />
 
         <main className="stage">
@@ -191,6 +234,14 @@ export default function App() {
                 transition={{ duration: 0.2 }}
                 className="tab-panel"
               >
+                {tab === "cases" && (
+                  <CaseLibrary
+                    state={state}
+                    onOpenCase={openCase}
+                    onNotify={notify}
+                    onRefresh={loadHealth}
+                  />
+                )}
                 {tab === "overview" && <Overview state={state} meta={meta} />}
                 {tab === "timeline" && (
                   <Timeline

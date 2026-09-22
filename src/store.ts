@@ -46,6 +46,8 @@ interface Snapshot {
   followUps: FollowUpQuestion[];
   report: ReconstructionReport | null;
   reconstruction: ReconstructionState;
+  /** Which case the dashboard is currently showing. */
+  activeIncidentId: string | null;
 }
 
 function emptySnapshot(): Snapshot {
@@ -71,6 +73,7 @@ function emptySnapshot(): Snapshot {
       message: "Ready to reconstruct.",
       error: null,
     },
+    activeIncidentId: null,
   };
 }
 
@@ -119,7 +122,53 @@ class Store extends EventEmitter {
   }
 
   getIncident(): Incident | null {
-    return this.data.incidents[0] ?? null;
+    const id = this.data.activeIncidentId;
+    return (id && this.data.incidents.find((i) => i.id === id)) || this.data.incidents[0] || null;
+  }
+
+  /** Every case on file, newest first, with enough detail for the library. */
+  listCases(): (Incident & { participants: number; contradictions: number; active: boolean })[] {
+    const activeId = this.getIncident()?.id;
+    return [...this.data.incidents]
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .map((i) => ({
+        ...i,
+        participants: this.data.witnesses.filter((w) => w.incidentId === i.id).length,
+        contradictions: this.data.findings.filter(
+          (f) => f.incidentId === i.id && f.type === "contradiction",
+        ).length,
+        active: i.id === activeId,
+      }));
+  }
+
+  setActiveCase(id: string): Incident | null {
+    const found = this.data.incidents.find((i) => i.id === id);
+    if (!found) return null;
+    this.data.activeIncidentId = id;
+    this.changed("case:activated");
+    return found;
+  }
+
+  /** Removes a case and everything belonging to it. */
+  deleteCase(id: string): boolean {
+    if (!this.data.incidents.some((i) => i.id === id)) return false;
+    this.data.incidents = this.data.incidents.filter((i) => i.id !== id);
+    const gone = (x: { incidentId: string }) => x.incidentId !== id;
+    this.data.witnesses = this.data.witnesses.filter(gone);
+    this.data.interviews = this.data.interviews.filter(gone);
+    this.data.claims = this.data.claims.filter(gone);
+    this.data.findings = this.data.findings.filter(gone);
+    this.data.timeline = this.data.timeline.filter(gone);
+    this.data.evidence = this.data.evidence.filter(gone);
+    this.data.externalSources = this.data.externalSources.filter(gone);
+    this.data.agentActions = this.data.agentActions.filter(gone);
+    this.data.followUps = this.data.followUps.filter(gone);
+    if (this.data.report?.incidentId === id) this.data.report = null;
+    if (this.data.activeIncidentId === id) {
+      this.data.activeIncidentId = this.data.incidents[0]?.id ?? null;
+    }
+    this.changed("case:deleted");
+    return true;
   }
 
   getWitness(id: string): Witness | undefined {
@@ -147,7 +196,9 @@ class Store extends EventEmitter {
       createdAt: new Date().toISOString(),
       ...input,
     };
-    this.data.incidents = [incident];
+    // Cases accumulate into a library; opening one does not discard the rest.
+    this.data.incidents.push(incident);
+    this.data.activeIncidentId = incident.id;
     this.changed("incident:created");
     return incident;
   }
@@ -547,9 +598,12 @@ class Store extends EventEmitter {
     timeline: TimelineEvent[],
     engine: string,
   ): void {
-    this.data.claims = claims;
-    this.data.findings = findings;
-    this.data.timeline = timeline;
+    // Scope the replacement to this case so other investigations survive.
+    const caseId = this.getIncident()?.id;
+    const other = (x: { incidentId: string }) => x.incidentId !== caseId;
+    this.data.claims = [...this.data.claims.filter(other), ...claims];
+    this.data.findings = [...this.data.findings.filter(other), ...findings];
+    this.data.timeline = [...this.data.timeline.filter(other), ...timeline];
     this.data.reconciliation = {
       status: "ready",
       lastRunAt: new Date().toISOString(),

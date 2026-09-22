@@ -44,7 +44,7 @@ const PACE = {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function demoMode(): boolean {
-  return (process.env.DEMO_MODE ?? "true").toLowerCase() !== "false";
+  return (process.env.DEMO_MODE ?? "false").toLowerCase() === "true";
 }
 
 let running = false;
@@ -132,6 +132,41 @@ export async function runReconstruction(): Promise<void> {
     running = false;
   }
 }
+
+/**
+ * Re-analyses the case from whatever testimony is currently on record.
+ *
+ * This is the live path: it runs after every completed interview, so a real
+ * call updates the timeline, the findings and the follow-up questions within
+ * seconds of the caller hanging up. The batch reconstruction calls the same
+ * code — there is no separate demo pipeline.
+ */
+export async function analyzeCase(): Promise<void> {
+  const incident = store.getIncident();
+  if (!incident) return;
+
+  const claims = await extractAll(incident);
+
+  // Public context is fetched once per case, and never on the critical path.
+  // Live retrieval can take the better part of a minute; the investigator must
+  // see the new testimony land on the timeline immediately, not wait on a web
+  // search. Sources stream in afterwards and push their own update.
+  const sources = store.getState().externalSources;
+  if (sources.length === 0 && !researchInFlight) {
+    researchInFlight = true;
+    void researchContext(incident)
+      .catch((err) => console.warn("[reconstruction] research failed:", (err as Error).message))
+      .finally(() => {
+        researchInFlight = false;
+      });
+  }
+
+  await reconcileAll(incident, claims, sources);
+  await writeReport(incident);
+}
+
+/** Guards against two calls racing the same one-time research pass. */
+let researchInFlight = false;
 
 // ---------------------------------------------------------------------- memory
 
@@ -410,6 +445,17 @@ async function reconcileAll(
   const deterministic = reconcile(claims, witnesses, incident);
   let result = { claims, ...deterministic };
   let engine = "rules engine";
+
+  // Paint the rules-engine verdict straight away. It is instant and complete
+  // on its own, so the investigator sees the new testimony land on the
+  // timeline within a second of the caller hanging up rather than waiting on
+  // a model round-trip. The merged result replaces it moments later.
+  store.applyAnalysis(
+    classify(result.claims, result.findings, sources),
+    result.findings,
+    result.timeline,
+    engine,
+  );
 
   if (llmConfigured()) {
     try {

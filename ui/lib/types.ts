@@ -244,7 +244,14 @@ export interface IntegrationStatus {
   detail: string;
 }
 
+export interface CaseSummary extends Incident {
+  participants: number;
+  contradictions: number;
+  active: boolean;
+}
+
 export interface AppState {
+  cases: CaseSummary[];
   demoMode: boolean;
   incident: Incident | null;
   participants: Participant[];
@@ -262,6 +269,7 @@ export interface AppState {
 }
 
 export const EMPTY_STATE: AppState = {
+  cases: [],
   demoMode: true,
   incident: null,
   participants: [],

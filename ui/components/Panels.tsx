@@ -19,12 +19,14 @@ export function ParticipantRail({
   focus,
   onFocus,
   onTranscript,
+  onCall,
 }: {
   state: AppState;
   meta: Map<string, ParticipantMeta>;
   focus: string | null;
   onFocus: (id: string | null) => void;
   onTranscript: (p: Participant) => void;
+  onCall: (id: string, name: string) => void;
 }) {
   return (
     <aside className="rail">
@@ -87,17 +89,30 @@ export function ParticipantRail({
                 />
               </div>
 
-              {done && iv && (
-                <button
-                  className="pcard-btn"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onTranscript(p);
-                  }}
-                >
-                  View transcript
-                </button>
-              )}
+              <div className="pcard-actions">
+                {p.hasPhone && !live && (
+                  <button
+                    className="pcard-btn call"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onCall(p.id, p.displayName);
+                    }}
+                  >
+                    {done ? "Call back" : "Call now"}
+                  </button>
+                )}
+                {done && iv && (
+                  <button
+                    className="pcard-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onTranscript(p);
+                    }}
+                  >
+                    Transcript
+                  </button>
+                )}
+              </div>
               {p.phoneMasked && !done && <div className="pcard-phone">{p.phoneMasked}</div>}
               {p.lastError && <div className="pcard-err">{p.lastError}</div>}
             </div>

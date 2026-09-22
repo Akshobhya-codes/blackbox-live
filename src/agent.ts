@@ -56,7 +56,8 @@ function identifyChecklist(incident: Incident) {
       "Hello. This is an automated AI interviewer from BlackBox. " +
         `I am collecting a witness statement for case ${incident.referenceId || "on file"}, ` +
         `regarding an incident at ${incident.location}. ` +
-        "This is a simulated recorded interview. I am not a human investigator and I cannot give advice.",
+        "This call is recorded for the investigation record. I am not a human " +
+        "investigator and I cannot give advice.",
     ),
     guava.Field({
       key: "witness_identity",
@@ -412,8 +413,8 @@ agent.onQuestion(async (_call, question) => {
   }
   if (/who are you|are you (a )?(human|robot|ai|bot)|recorded|recording/.test(q)) {
     return (
-      "I'm an AI interviewer from BlackBox. This is a simulated incident interview and it " +
-      "is being recorded for the investigation record."
+      "I'm an AI interviewer from BlackBox. This is an incident interview and it is " +
+      "being recorded for the investigation record."
     );
   }
   if (/case|investigation|why|what.*about/.test(q)) {
@@ -551,11 +552,13 @@ function summarize(fields: Record<string, unknown>): string {
  * take down a live call.
  */
 export function runReconciliationSafely(): void {
-  store
-    .runReconciliationSmart()
-    .then((r) => console.log(`[agent] reconciliation complete via ${r.engine}`))
+  // Deliberately not awaited: the caller is on a live phone line and must
+  // never wait on analysis. The dashboard updates over SSE when it lands.
+  import("./reconstruction.ts")
+    .then((m) => m.analyzeCase())
+    .then(() => console.log("[agent] case re-analysed after interview"))
     .catch((err) => {
-      console.error("[agent] reconciliation failed:", err);
+      console.error("[agent] analysis failed:", err);
       store.setReconciliation({ status: "error", error: (err as Error).message });
     });
 }

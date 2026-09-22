@@ -12,6 +12,16 @@
 
 import { scrape } from "./brightdata.ts";
 
+/**
+ * How long the proxied read gets to win.
+ *
+ * A warm Bright Data scrape of this endpoint lands around thirty seconds.
+ * That is affordable here only because the retrieval sits off the critical
+ * path: the timeline and the contradictions are already on screen, and this
+ * upgrades a conditions claim from disputed to settled when it arrives.
+ */
+const PROXY_BUDGET_MS = 35_000;
+
 export interface WeatherRecord {
   /** Canonical condition: clear | rain | fog | cloudy | snow. */
   condition: string;
@@ -90,15 +100,24 @@ export async function fetchWeather(
   // plan though, and a contended session can take longer than an investigator
   // will wait — so a direct read backs it up. Whichever served it is recorded
   // on the source rather than glossed over.
-  let data: WttrPayload | null = null;
+  // Both reads go out at once. Bright Data is preferred and gets the full
+  // budget to answer, but the direct read is already in hand by the time that
+  // budget expires, so the fallback costs nothing beyond the wait we would
+  // have spent anyway. Whichever actually served the record is recorded on it
+  // rather than glossed over.
+  const direct = fetchDirect(url);
+  direct.catch(() => null);
+
+  const proxied = await Promise.race([
+    scrape(url).catch(() => ""),
+    new Promise<string>((resolve) => setTimeout(() => resolve(""), PROXY_BUDGET_MS)),
+  ]);
+
+  let data: WttrPayload | null = proxied.trim() ? parsePayload(proxied) : null;
   let via: WeatherRecord["via"] = "brightdata:scrape_as_markdown";
-
-  const raw = await scrape(url).catch(() => "");
-  if (raw.trim()) data = parsePayload(raw);
-
   if (!data) {
     via = "direct";
-    data = await fetchDirect(url);
+    data = await direct;
   }
   if (!data) return null;
 

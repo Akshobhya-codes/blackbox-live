@@ -115,6 +115,18 @@ function parseHits(raw: string, limit: number): SearchHit[] {
 }
 
 /** One public-web search. Returns [] rather than throwing. */
+/**
+ * Starts the MCP session ahead of time.
+ *
+ * The first call spawns `npx @brightdata/mcp`, which costs twenty-odd
+ * seconds. Paying that during a live interview means the retrieval misses
+ * its window and a slower fallback serves the record instead. Paying it at
+ * boot means the proxied path is the one that actually answers.
+ */
+export async function warmUp(): Promise<boolean> {
+  return (await getClient()) !== null;
+}
+
 export async function search(query: string, limit = 3): Promise<SearchHit[]> {
   const client = await getClient();
   if (!client) return [];

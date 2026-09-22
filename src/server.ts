@@ -13,7 +13,7 @@ import { seedDemoCase, ensureCase } from "./cases/seed.ts";
 import { isRunning, runReconstruction } from "./reconstruction.ts";
 import { activeProvider, placeCall, providerDetail } from "./callProvider.ts";
 import { isDockerAvailable } from "./adapters/sandbox.ts";
-import { brightDataConfigured } from "./adapters/brightdata.ts";
+import { brightDataConfigured, warmUp } from "./adapters/brightdata.ts";
 import * as brain from "./adapters/brain.ts";
 import { llmConfigured } from "./llm.ts";
 import { isPlausiblePhone, maskPhone } from "./normalize.ts";
@@ -347,6 +347,10 @@ process.on("unhandledRejection", (reason) => {
 const server = app.listen(PORT, () => {
   if (!store.getIncident()) seedDemoCase();
   void startVoice();
+  // Spin the retrieval session up now so the first live lookup is quick.
+  void warmUp()
+    .then((ok) => ok && console.log("[brightdata] session warm"))
+    .catch(() => {});
   console.log(`\n  BLACKBOX  ·  http://localhost:${PORT}`);
   console.log(`  Autonomous incident reconstruction`);
   console.log(`  demo mode: ${DEMO_MODE ? "on" : "off"} · voice: ${providerDetail()}\n`);

@@ -114,17 +114,21 @@ records which path actually served each step. Nothing is claimed that did not ha
 
 | | Status | Notes |
 |---|---|---|
-| **Cognee** `1.6.0` | ✅ **live, verified** | Real graph. The adapter introspects the installed module and binds to `remember`/`recall` (1.x) or `add`/`cognify`/`search` (0.x) rather than guessing. Verified: ingest returns `{ok:true}` and recall answers *"Maya Chen was driving the black Tesla, travelling northbound on 4th Street"* from the graph via `HYBRID_COMPLETION`. |
+| **Cognee** | ✅ **live, verified — hosted tenant** | Runs against a hosted Cognee graph on `aws.cognee.ai` over its REST API (`add_text` → `cognify` → `recall`). Verified: ingest returns `{ok:true}` and recall answers *"Maya Chen was driving the black Tesla, and she was travelling northbound"* from the graph via `GRAPH_COMPLETION`. Falls back to the local `cognee` 1.6.0 SDK when no tenant is configured — that path is verified too, and the adapter introspects the installed module rather than guessing its API. |
 | **Strands** `1.56.0` | ✅ **live, verified** | The Report Agent is a real `strands.Agent` on an OpenAI model provider with a Pydantic `structured_output_model`. Falls back to a deterministic local report if unavailable. |
 | **Bright Data** | ⚠️ demo fixtures | Full MCP client is implemented (`npx @brightdata/mcp`, `search_engine` / `scrape_as_markdown`). Set `BRIGHTDATA_API_TOKEN` to go live. Without it, fixtures are used and every source card is stamped `demo_fixture`. |
 | **Docker Sandbox** | ⚠️ local fallback | Evidence is processed in a container with `--network none --cap-drop ALL --read-only --no-new-privileges` and memory/CPU/pid caps. No Docker daemon on this machine, so the restricted local path runs instead — each evidence card shows which one executed. |
 | **Voice** | ⚠️ simulator | `DEMO_MODE=true`. The simulator drives the same interview protocol, state machine and downstream pipeline as a real call; only the audio layer is swapped. A Guava provider is wired for `DEMO_MODE=false`. |
 | **OpenAI** | ✅ live | Claim analysis, Cognee extraction, and the Report Agent. |
 
-**Cognee storage note.** Cognee defaults its vector store inside `site-packages`. Under a
-OneDrive-synced path containing spaces, LanceDB cannot persist there and every `cognify` call
-dies with an opaque IO error. The adapter relocates the store to `~/.blackbox-cognee` before
-anything touches it — override with `COGNEE_STORAGE_DIR`.
+**Two Cognee paths.** With `COGNEE_API_URL` + `COGNEE_API_KEY` set, the brain service talks to a
+hosted tenant — the graph is durable, shared, and inspectable in the Cognee dashboard. Without
+them it falls back to the local SDK, so the project still runs with no Cognee account at all.
+
+The local path has one trap worth recording: Cognee defaults its vector store inside
+`site-packages`, and under a OneDrive-synced path containing spaces LanceDB cannot persist there,
+so every `cognify` dies with an opaque IO error. The adapter relocates the store to
+`~/.blackbox-cognee` before anything touches it — override with `COGNEE_STORAGE_DIR`.
 
 ---
 

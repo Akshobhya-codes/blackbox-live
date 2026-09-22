@@ -41,7 +41,147 @@ Mode = Literal["live", "demo", "unavailable"]
 
 
 # ---------------------------------------------------------------------------
-# Cognee
+# Cognee - hosted tenant
+# ---------------------------------------------------------------------------
+class HostedCogneeAdapter:
+    """Talks to a hosted Cognee tenant over its REST API.
+
+    Preferred over the local SDK when COGNEE_API_URL and COGNEE_API_KEY are set:
+    the graph is durable, shared, and inspectable in the Cognee dashboard rather
+    than living in a throwaway directory on one laptop.
+
+    Ingest is add_text per document followed by a cognify over the dataset;
+    recall is a graph completion against that dataset.
+    """
+
+    def __init__(self) -> None:
+        self.base = (os.getenv("COGNEE_API_URL") or "").rstrip("/")
+        self.key = os.getenv("COGNEE_API_KEY") or ""
+        self.error: str | None = None
+        self.last_graph: dict[str, Any] | None = None
+        if not self.base or not self.key:
+            self.error = "COGNEE_API_URL / COGNEE_API_KEY not set"
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base and self.key)
+
+    @property
+    def mode(self) -> Mode:
+        return "live" if self.configured else "unavailable"
+
+    def detail(self) -> str:
+        if not self.configured:
+            return self.error or "hosted tenant not configured"
+        domain = self.base.split("//")[-1]
+        tenant = domain.split(".")[0].replace("tenant-", "")[:8]
+        host = ".".join(domain.split(".")[1:]) or domain
+        return f"hosted graph on {host} (tenant {tenant}…)"
+
+    def _headers(self) -> dict[str, str]:
+        return {"X-Api-Key": self.key}
+
+    async def ingest(self, dataset: str, documents: list[str]) -> dict[str, Any]:
+        if not self.configured:
+            return {"ok": False, "mode": self.mode, "detail": self.detail()}
+
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(timeout=120.0, headers=self._headers()) as client:
+                # textData takes the whole batch as a list, not one string per call.
+                r = await client.post(
+                    f"{self.base}/api/v1/add_text",
+                    json={"textData": documents, "datasetName": dataset},
+                )
+                r.raise_for_status()
+
+                # Build the graph. Run inline so the caller knows when the
+                # memory is actually queryable rather than merely queued.
+                r = await client.post(
+                    f"{self.base}/api/v1/cognify",
+                    json={"datasets": [dataset], "runInBackground": False},
+                )
+                r.raise_for_status()
+
+            return {
+                "ok": True,
+                "mode": "live",
+                "documents": len(documents),
+                "detail": f"ingested into hosted dataset '{dataset}'",
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "mode": "live",
+                "detail": f"hosted ingest failed: {_describe(exc)}",
+            }
+
+    async def recall(self, dataset: str, query: str) -> dict[str, Any]:
+        if not self.configured:
+            return {"ok": False, "mode": self.mode, "detail": self.detail(), "results": []}
+
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(timeout=90.0, headers=self._headers()) as client:
+                r = await client.post(
+                    f"{self.base}/api/v1/recall",
+                    json={
+                        "query": query,
+                        "searchType": "GRAPH_COMPLETION",
+                        "datasets": [dataset],
+                        "topK": 8,
+                    },
+                )
+                r.raise_for_status()
+                payload = r.json()
+
+            items = payload if isinstance(payload, list) else [payload]
+            return {
+                "ok": True,
+                "mode": "live",
+                "results": [str(x)[:1200] for x in items][:12],
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "mode": "live",
+                "detail": f"hosted recall failed: {_describe(exc)}",
+                "results": [],
+            }
+
+    async def graph_summary(self) -> dict[str, Any]:
+        """Node/edge counts, so the dashboard can show the graph really exists."""
+        if not self.configured:
+            return {}
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0, headers=self._headers()) as client:
+                r = await client.get(f"{self.base}/api/v1/datasets/graph-summary")
+                r.raise_for_status()
+                self.last_graph = r.json()
+                return self.last_graph or {}
+        except Exception:
+            return {}
+
+
+def _describe(exc: Exception) -> str:
+    """HTTP errors carry their reason in the body, not the exception text."""
+    body = ""
+    try:
+        import httpx
+
+        if isinstance(exc, httpx.HTTPStatusError):
+            body = f" {exc.response.status_code}: {exc.response.text[:220]}"
+    except Exception:
+        pass
+    return f"{type(exc).__name__}{body or f': {exc}'}"
+
+
+# ---------------------------------------------------------------------------
+# Cognee - local SDK
 # ---------------------------------------------------------------------------
 class CogneeAdapter:
     """Wraps whichever Cognee API surface is actually installed.
@@ -253,7 +393,20 @@ def _compact(payload: dict[str, Any], limit: int = 14000) -> str:
     return text[:limit]
 
 
-cognee_adapter = CogneeAdapter()
+def _select_cognee() -> Any:
+    """Hosted tenant if configured, otherwise the local SDK.
+
+    A hosted graph is durable and inspectable in the Cognee dashboard, so it
+    wins whenever credentials are present. The local SDK stays as the offline
+    path so the project still runs with no Cognee account at all.
+    """
+    hosted = HostedCogneeAdapter()
+    if hosted.configured:
+        return hosted
+    return CogneeAdapter()
+
+
+cognee_adapter = _select_cognee()
 strands_adapter = StrandsAdapter()
 
 

@@ -290,12 +290,42 @@ async function researchContext(incident: Incident): Promise<ExternalSource[]> {
   });
 
   const queries = bb204Queries(incident.location, incident.approximateTime);
+  // Each entry carries a fallback URL: this account has scraping but no usable
+  // SERP zone, and reading a named authoritative page is still live retrieval.
   const plan: brightdata.ResearchRequest[] = [
-    { query: queries[0], category: "weather", relevance: "Visibility and road conditions at the reported time.", bearing: "context" },
-    { query: queries[1], category: "traffic_signal", relevance: "Whether crossing approaches can show green simultaneously.", bearing: "challenges" },
-    { query: queries[2], category: "street_layout", relevance: "Approach geometry and crosswalk positions.", bearing: "supports" },
-    { query: queries[3], category: "camera", relevance: "Possible private cameras overlooking the approaches.", bearing: "supports" },
-    { query: queries[4], category: "road_closure", relevance: "Any signal fault or closure on the incident date.", bearing: "context" },
+    {
+      query: queries[0],
+      url: "https://forecast.weather.gov/MapClick.php?lat=37.7749&lon=-122.4194",
+      title: "National Weather Service — San Francisco conditions",
+      category: "weather",
+      relevance: "Visibility and road conditions around the reported time.",
+      bearing: "context",
+    },
+    {
+      query: queries[1],
+      url: "https://www.sfmta.com/getting-around/drive-park/traffic-signals",
+      title: "SFMTA — traffic signals",
+      category: "traffic_signal",
+      relevance:
+        "Signal phasing policy: whether crossing approaches can ever show green at the same time.",
+      bearing: "challenges",
+    },
+    {
+      query: queries[2],
+      url: "https://en.wikipedia.org/wiki/South_of_Market,_San_Francisco",
+      title: "South of Market — street grid",
+      category: "street_layout",
+      relevance: "Street grid and one-way pattern around Harrison and 4th.",
+      bearing: "supports",
+    },
+    {
+      query: queries[3],
+      url: "https://www.sfmta.com/travel-alerts",
+      title: "SFMTA — travel alerts",
+      category: "road_closure",
+      relevance: "Any signal fault, closure, or advisory affecting the intersection.",
+      bearing: "context",
+    },
   ];
 
   let sources: Omit<ExternalSource, "id">[] = [];

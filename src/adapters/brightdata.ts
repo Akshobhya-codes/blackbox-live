@@ -128,39 +128,81 @@ export async function scrape(url: string): Promise<string> {
 
 export interface ResearchRequest {
   query: string;
+  /** Authoritative page to read when SERP is unavailable on the account. */
+  url?: string;
+  title?: string;
   category: ExternalSource["category"];
   relevance: string;
   bearing: ExternalSource["bearing"];
 }
 
+/** Pulls a readable snippet out of a scraped markdown page. */
+function snippetFrom(markdown: string, maxLen = 340): string {
+  const line = markdown
+    .split("\n")
+    .map((l) => l.replace(/^[#>*\-\s|]+/, "").trim())
+    // Skip nav chrome and link-only lines; keep the first real sentence.
+    .find((l) => l.length > 60 && !/^\[|^!\[|^https?:/.test(l));
+  const text = (line ?? markdown.replace(/\s+/g, " ")).trim();
+  return text.length <= maxLen ? text : text.slice(0, maxLen - 1).trimEnd() + "…";
+}
+
+function titleFrom(markdown: string, fallback: string): string {
+  const h1 = /^#\s+(.{4,120})$/m.exec(markdown);
+  return h1 ? h1[1].trim() : fallback;
+}
+
 /**
- * Runs the case's research plan. Each query that returns something yields a
- * live source; anything that returns nothing simply contributes no source,
- * and the caller decides whether to fall back to fixtures.
+ * Runs the case's research plan against Bright Data.
+ *
+ * Prefers SERP, but falls back to reading a named authoritative page when the
+ * account has no usable SERP zone — scraping and search are separate products
+ * and an account can have one without the other. Either way the result is a
+ * live retrieval, and `provider` records which tool actually produced it.
+ * A request that yields nothing contributes no source; the caller decides
+ * whether to fall back to fixtures.
  */
 export async function research(
   requests: ResearchRequest[],
   incidentId: string,
 ): Promise<Omit<ExternalSource, "id">[]> {
   const out: Omit<ExternalSource, "id">[] = [];
+
   for (const req of requests) {
+    const base = {
+      incidentId,
+      category: req.category,
+      retrievedAt: new Date().toISOString(),
+      relevance: req.relevance,
+      relatedClaimIds: [] as string[],
+      bearing: req.bearing,
+    };
+
     const hits = await search(req.query, 1);
-    for (const hit of hits) {
-      if (!hit.url) continue;
+    if (hits.length > 0 && hits[0].url) {
       out.push({
-        incidentId,
-        title: hit.title,
-        url: hit.url,
-        snippet: hit.snippet || "(no snippet returned)",
-        category: req.category,
-        retrievedAt: new Date().toISOString(),
-        relevance: req.relevance,
-        relatedClaimIds: [],
-        bearing: req.bearing,
+        ...base,
+        title: hits[0].title,
+        url: hits[0].url,
+        snippet: hits[0].snippet || "(no snippet returned)",
         provider: "brightdata:search_engine",
       });
+      continue;
     }
+
+    if (!req.url) continue;
+    const markdown = await scrape(req.url);
+    if (!markdown.trim()) continue;
+
+    out.push({
+      ...base,
+      title: titleFrom(markdown, req.title ?? req.url),
+      url: req.url,
+      snippet: snippetFrom(markdown),
+      provider: "brightdata:scrape_as_markdown",
+    });
   }
+
   return out;
 }
 

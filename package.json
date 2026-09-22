@@ -1,35 +1,42 @@
 {
   "name": "blackbox",
   "version": "1.0.0",
-  "description": "BlackBox — every witness has a piece. BlackBox builds the timeline.",
+  "description": "Autonomous incident reconstruction — interviews everyone involved, reconciles their accounts with real-world evidence, and builds a source-traceable timeline.",
   "type": "module",
   "scripts": {
-    "prestart": "vite build",
     "start": "tsx src/server.ts",
+    "prestart": "vite build",
+    "dev": "concurrently -k -n ui,api,brain -c cyan,green,magenta npm:ui npm:dev:api npm:brain",
     "predev": "vite build",
-    "dev": "concurrently -k -n ui,api -c cyan,green npm:ui npm:dev:api",
     "dev:api": "tsx watch src/server.ts",
     "ui": "vite build --watch",
     "build": "vite build",
-    "chat": "tsx src/agent-cli.ts --chat",
-    "roleplay": "tsx src/agent-cli.ts --roleplay",
-    "webrtc": "tsx src/agent-cli.ts --webrtc",
+    "brain": "node scripts/brain.mjs",
+    "test": "tsx src/selftest.ts && tsx src/casetest.ts",
     "selftest": "tsx src/selftest.ts",
-    "typecheck": "tsc --noEmit"
+    "casetest": "tsx src/casetest.ts",
+    "typecheck": "tsc --noEmit",
+    "chat": "tsx src/agent-cli.ts --chat",
+    "roleplay": "tsx src/agent-cli.ts --roleplay"
   },
   "keywords": [
-    "guava",
+    "incident-reconstruction",
+    "cognee",
+    "bright-data",
+    "strands",
     "voice-ai",
-    "incident",
     "investigation"
   ],
   "license": "MIT",
   "dependencies": {
     "@guava-ai/guava-sdk": "^0.33.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "framer-motion": "^13.4.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "reactflow": "^11.11.4",
     "zod": "^4.5.4"
   },
   "devDependencies": {

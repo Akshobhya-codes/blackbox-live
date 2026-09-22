@@ -10,11 +10,18 @@ import { mergeAnalyses, reconcile } from "./reconcile.ts";
 import { analyzeWithLLM, llmConfigured } from "./llm.ts";
 import { toE164 } from "./normalize.ts";
 import type {
+  AgentAction,
   Claim,
   Finding,
+  EvidenceItem,
+  ExternalSource,
+  FollowUpQuestion,
   Incident,
   Interview,
+  ParticipantRole,
   ReconciliationState,
+  ReconstructionReport,
+  ReconstructionState,
   TimelineEvent,
   TranscriptTurn,
   Witness,
@@ -32,6 +39,13 @@ interface Snapshot {
   reconciliation: ReconciliationState;
   /** Prompts an investigator pinned to be asked first on the next call. */
   queuedPrompts: string[];
+  evidence: EvidenceItem[];
+  externalSources: ExternalSource[];
+  /** Append-only audit trail, newest last. */
+  agentActions: AgentAction[];
+  followUps: FollowUpQuestion[];
+  report: ReconstructionReport | null;
+  reconstruction: ReconstructionState;
 }
 
 function emptySnapshot(): Snapshot {
@@ -44,6 +58,19 @@ function emptySnapshot(): Snapshot {
     timeline: [],
     reconciliation: { status: "idle", lastRunAt: null, error: null, engine: "deterministic" },
     queuedPrompts: [],
+    evidence: [],
+    externalSources: [],
+    agentActions: [],
+    followUps: [],
+    report: null,
+    reconstruction: {
+      phase: "idle",
+      startedAt: null,
+      completedAt: null,
+      progress: 0,
+      message: "Ready to reconstruct.",
+      error: null,
+    },
   };
 }
 
@@ -125,7 +152,14 @@ class Store extends EventEmitter {
     return incident;
   }
 
-  addWitness(incidentId: string, displayName: string, phoneNumber: string): Witness {
+  addWitness(
+    incidentId: string,
+    displayName: string,
+    phoneNumber: string,
+    role: ParticipantRole = "witness",
+    descriptor = "",
+    approach?: string,
+  ): Witness {
     const witness: Witness = {
       id: newId("wit"),
       incidentId,
@@ -136,6 +170,9 @@ class Store extends EventEmitter {
       interviewStartedAt: null,
       interviewCompletedAt: null,
       lastError: null,
+      role,
+      descriptor,
+      approach,
     };
     this.data.witnesses.push(witness);
     this.changed("witness:added");
@@ -433,6 +470,93 @@ class Store extends EventEmitter {
 
     this.setReconciliation({ status: "ready", engine: "deterministic" });
     return { ...deterministic, engine: "deterministic" };
+  }
+
+
+  // ------------------------------------------------------- case file objects
+
+  addEvidence(item: Omit<EvidenceItem, "id" | "incidentId">, incidentId: string): EvidenceItem {
+    const ev: EvidenceItem = { id: newId("evd"), incidentId, ...item };
+    this.data.evidence.push(ev);
+    this.changed("evidence:added");
+    return ev;
+  }
+
+  updateEvidence(id: string, patch: Partial<EvidenceItem>): void {
+    const ev = this.data.evidence.find((e) => e.id === id);
+    if (!ev) return;
+    Object.assign(ev, patch);
+    this.changed("evidence:updated");
+  }
+
+  addExternalSource(src: Omit<ExternalSource, "id">): ExternalSource {
+    const s: ExternalSource = { id: newId("src"), ...src };
+    this.data.externalSources.push(s);
+    this.changed("source:added");
+    return s;
+  }
+
+  /**
+   * Appends to the activity feed. Returns the id so a long-running step can be
+   * marked done or failed once it finishes.
+   */
+  logAction(action: Omit<AgentAction, "id" | "at">): string {
+    const a: AgentAction = { id: newId("act"), at: new Date().toISOString(), ...action };
+    this.data.agentActions.push(a);
+    // The feed is a demo surface as much as an audit trail; keep it bounded.
+    if (this.data.agentActions.length > 400) this.data.agentActions.splice(0, 100);
+    this.changed("agent:action");
+    return a.id;
+  }
+
+  finishAction(id: string, status: "done" | "failed", detail?: string): void {
+    const a = this.data.agentActions.find((x) => x.id === id);
+    if (!a) return;
+    a.status = status;
+    if (detail) a.detail = detail;
+    this.changed("agent:action");
+  }
+
+  setFollowUps(items: FollowUpQuestion[]): void {
+    this.data.followUps = items;
+    this.changed("followups:set");
+  }
+
+  setReport(report: ReconstructionReport | null): void {
+    this.data.report = report;
+    this.changed("report:set");
+  }
+
+  setReconstruction(patch: Partial<ReconstructionState>): void {
+    this.data.reconstruction = { ...this.data.reconstruction, ...patch };
+    this.changed("reconstruction:state");
+  }
+
+  /** Replaces the transcript wholesale — used by the deterministic simulator. */
+  setTranscript(interviewId: string, turns: TranscriptTurn[]): void {
+    const iv = this.data.interviews.find((i) => i.id === interviewId);
+    if (!iv) return;
+    iv.transcript = turns;
+    this.changed("transcript:set");
+  }
+
+  /** Installs a completed analysis pass as the current case state. */
+  applyAnalysis(
+    claims: Claim[],
+    findings: Finding[],
+    timeline: TimelineEvent[],
+    engine: string,
+  ): void {
+    this.data.claims = claims;
+    this.data.findings = findings;
+    this.data.timeline = timeline;
+    this.data.reconciliation = {
+      status: "ready",
+      lastRunAt: new Date().toISOString(),
+      error: null,
+      engine,
+    };
+    this.changed("analysis:applied");
   }
 
   reset(): void {

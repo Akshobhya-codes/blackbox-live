@@ -1,0 +1,13 @@
+# BlackBox brain service — Cognee memory + Strands agents.
+# Versions pinned to what the project was built and tested against.
+
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+pydantic==2.13.5
+python-dotenv==1.2.3
+httpx==0.28.1
+
+# Sponsor integrations
+cognee==1.6.0
+strands-agents==1.56.0
+strands-agents-tools==0.8.9

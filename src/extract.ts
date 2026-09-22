@@ -18,6 +18,7 @@ import {
   findMentions,
   formatClock,
   isNegatedBefore,
+  negatedMentions,
   parseClockTime,
   splitIntoSegments,
   type Segment,
@@ -107,6 +108,7 @@ export function extractClaims(
       const certainty = certaintyOf(seg.text);
       const entityMentions = findMentions(seg.text, ENTITIES);
       const eventMentions = findMentions(seg.text, EVENTS);
+      const negSet = negatedMentions(seg.text, eventMentions);
 
       for (const em of entityMentions) {
         push({
@@ -138,7 +140,7 @@ export function extractClaims(
 
       // Observed vs explicitly-not-observed.
       for (const ev of eventMentions) {
-        const absent = isNegatedBefore(seg.text, ev.index);
+        const absent = negSet.has(ev.index);
         push({
           category: "presence",
           subject: ev.key,
@@ -316,6 +318,11 @@ function extractTemporalOrder(
     });
   };
 
+  // Pairs the speaker ordered explicitly. Narrative position must not later
+  // contradict them: mentioning the impact early and the horn late does not mean
+  // the impact happened first, and the speaker already told us which came first.
+  const explicitPairs = new Set<string>();
+
   // (1) Explicit before/after inside a single clause takes priority.
   for (const seg of segments) {
     const mentions = findMentions(seg.text, EVENTS).filter(
@@ -333,6 +340,32 @@ function extractTemporalOrder(
     }
   }
 
+  // (1b) Adjacency across a progression marker: "I heard a horn, then the crash".
+  // Saying "X, then Y" states a sequence just as plainly as "X before Y", so it
+  // carries the same weight. Without this, an event merely *mentioned* earlier
+  // for reference ("at the moment of impact") outranks the speaker's own
+  // explicit ordering and manufactures a contradiction against them.
+  for (let i = 0; i < segments.length - 1; i++) {
+    const next = segments[i + 1];
+    if (!next.startsWithProgression) continue;
+
+    const here = findMentions(segments[i].text, EVENTS);
+    const hereNeg = negatedMentions(segments[i].text, here);
+    const left = here.filter((m) => !hereNeg.has(m.index)).pop();
+
+    const there = findMentions(next.text, EVENTS);
+    const thereNeg = negatedMentions(next.text, there);
+    const right = there.filter((m) => !thereNeg.has(m.index))[0];
+
+    if (!left || !right || left.key === right.key) continue;
+    explicitPairs.add([left.key, right.key].sort().join("|"));
+    emit(
+      left.key,
+      right.key,
+      excerpt(segments[i].raw + " " + next.raw, 220),
+      certaintyOf(segments[i].text + " " + next.text),
+    );
+  }
   // (2) Narrative order: first mention of each event defines its step.
   const firstAt = new Map<string, { step: number; seg: Segment }>();
   for (const seg of segments) {
@@ -374,6 +407,7 @@ function extractTemporalOrder(
       const [earlierKey, earlier] = ordered[i];
       const [laterKey, later] = ordered[j];
       if (earlier.step === later.step) continue; // same beat — no order asserted
+      if (explicitPairs.has([earlierKey, laterKey].sort().join("|"))) continue;
       emit(
         earlierKey,
         laterKey,

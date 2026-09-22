@@ -6,6 +6,7 @@
 
 import { EVENTS, EXCLUSIVE_PREDICATES, entityLabel, eventLabel, eventNoun } from "./lexicon.ts";
 import { formatClock, parseClockTime } from "./normalize.ts";
+import { detectJointImpossibilities } from "./jointRules.ts";
 import type { Claim, Finding, Incident, TimelineEvent, Witness } from "./types.ts";
 
 /** Clock times inside this window are treated as the same reported time. */
@@ -59,6 +60,30 @@ export function reconcile(
 
   const findings: Finding[] = [];
   const disputedSubjects = new Set<string>();
+
+  // Jointly-impossible sets are detected before anything else, because two
+  // claims can agree on their literal value and still be impossible together:
+  // two drivers each recalling a green light both literally say "green".
+  const joint = detectJointImpossibilities(claims, witnesses, incident);
+  const jointlySuppressed = new Set(joint.flatMap((j) => j.suppressTopics));
+  for (const j of joint) {
+    for (const cid of j.claimIds) {
+      const c = claims.find((x) => x.id === cid);
+      if (c) disputedSubjects.add(c.subject);
+    }
+    findings.push({
+      id: newId("fnd"),
+      incidentId: incident.id,
+      type: "contradiction",
+      title: j.title,
+      explanation: j.explanation,
+      involvedWitnessIds: j.witnessIds,
+      sourceClaimIds: j.claimIds,
+      followUpQuestion: j.followUpQuestion,
+      witnessPrompt: j.followUpQuestion,
+      askPriority: -1,
+    });
+  }
 
   // ---------------------------------------------------------------- grouping
   // Group by the thing being described, so we can ask: who said what about it?
@@ -256,7 +281,13 @@ export function reconcile(
         }
       }
 
-      if (values.size > 1 && EXCLUSIVE_PREDICATES.has(sample.predicate)) {
+      const topicKey = sample.subject + "." + sample.predicate;
+      if (
+        values.size > 1 &&
+        EXCLUSIVE_PREDICATES.has(sample.predicate) &&
+        // superseded by a joint rule that states the problem precisely
+        !jointlySuppressed.has(topicKey)
+      ) {
         disputedSubjects.add(sample.subject);
         findings.push({
           id: newId("fnd"),
@@ -275,7 +306,10 @@ export function reconcile(
               ? `What ${sample.predicate} was the ${lower(entityLabel(sample.subject))}, and what were the lighting conditions where you were standing?`
               : `What ${sample.predicate} was the ${lower(entityLabel(sample.subject))} from where you were standing?`,
         });
-      } else if (values.size === 1) {
+      } else if (
+        values.size === 1 &&
+        !jointlySuppressed.has(sample.subject + "." + sample.predicate)
+      ) {
         const [value, ws] = [...values.entries()][0];
         if (ws.length >= 2) {
           findings.push({
@@ -583,7 +617,13 @@ const TYPE_ORDER: Record<Finding["type"], number> = {
 
 function rank(findings: Finding[]): Finding[] {
   return [...findings].sort(
-    (a, b) => TYPE_ORDER[a.type] - TYPE_ORDER[b.type] || a.title.localeCompare(b.title),
+    (a, b) =>
+      TYPE_ORDER[a.type] - TYPE_ORDER[b.type] ||
+      // Lower askPriority is more urgent. Joint impossibilities carry -1, so a
+      // "these accounts cannot all be true" always leads its section and wins
+      // topic deduplication against a weaker finding about the same thing.
+      (a.askPriority ?? 5) - (b.askPriority ?? 5) ||
+      a.title.localeCompare(b.title),
   );
 }
 
@@ -624,7 +664,11 @@ export function mergeAnalyses(deterministic: Analysis, llm: Analysis): Analysis 
           .map((c) => `${c.subject}.${c.predicate}`),
       ),
     ].sort();
-    return `${f.type}:${topics.join("|")}`;
+    // Identity is the topic *and* who it concerns: one witness contradicting
+    // himself about the signal is not the same finding as two drivers
+    // contradicting each other about it.
+    const who = [...new Set(f.involvedWitnessIds)].sort().join(",");
+    return `${f.type}:${topics.join("|")}::${who}`;
   };
 
   const topicSet = (f: Finding): Set<string> =>
@@ -644,6 +688,30 @@ export function mergeAnalyses(deterministic: Analysis, llm: Analysis): Analysis 
     if (f.type === "contradiction") for (const t of topicSet(f)) disputedTopics.add(t);
   }
 
+  // Did the rules engine already rule that the reported times, while
+  // different, sit inside normal estimation error?
+  const timeRuledUncertain = deterministic.findings.some(
+    (f) => f.type === "open_question" && /estimation uncertainty/i.test(f.title),
+  );
+
+  /** True when a finding is *only* about clock times. */
+  const isPurelyTemporal = (f: Finding): boolean => {
+    const cs = f.sourceClaimIds
+      .map((id) => claimById.get(id))
+      .filter((c): c is Claim => Boolean(c));
+    return cs.length > 0 && cs.every((c) => c.category === "time_point");
+  };
+
+  // Participant sets the rules engine has already ruled on. Its wording is
+  // precise and its rules are auditable, so where it has spoken it is
+  // authoritative; the model's job is to cover ground the lexicon cannot,
+  // not to restate the same dispute in looser language.
+  const alreadyRuledParticipants = new Set(
+    deterministic.findings
+      .filter((f) => f.type === "contradiction")
+      .map((f) => [...new Set(f.involvedWitnessIds)].sort().join(",")),
+  );
+
   const seen = new Set<string>();
   const findings: Finding[] = [];
   const keptTerms: { type: string; terms: Set<string> }[] = [];
@@ -651,6 +719,22 @@ export function mergeAnalyses(deterministic: Analysis, llm: Analysis): Analysis 
   // Deterministic first, so its wording wins on anything both engines found.
   for (const f of all) {
     if (f.type === "agreement" && [...topicSet(f)].some((t) => disputedTopics.has(t))) continue;
+
+    // People estimate times badly; that is recall error, not an incompatible
+    // pair of claims. Where the engine has already filed the spread as
+    // uncertainty, a model-flagged time conflict is dropped — otherwise the
+    // board asserts both readings of the same fact at once.
+    if (f.type === "contradiction" && timeRuledUncertain && isPurelyTemporal(f)) continue;
+
+    // A model conflict between exactly the people the engine has already
+    // ruled on is a re-description of that ruling.
+    if (
+      f.type === "contradiction" &&
+      llm.findings.includes(f) &&
+      alreadyRuledParticipants.has([...new Set(f.involvedWitnessIds)].sort().join(","))
+    ) {
+      continue;
+    }
     const key = signature(f);
     if (seen.has(key)) continue;
 

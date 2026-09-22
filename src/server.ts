@@ -1,85 +1,62 @@
 // BlackBox API + dashboard host.
 //
-// One process runs everything: the HTTP API, the static dashboard, the SSE
-// stream, and the Guava Expert. No tunnel, no broker, no second terminal.
+// One process serves the HTTP API, the static dashboard, the SSE stream, and
+// the reconstruction orchestrator. Phone numbers are masked on the way out and
+// never reach the browser in full.
 
 import "dotenv/config";
 import express from "express";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { store } from "./store.ts";
+import { seedDemoCase, ensureCase } from "./cases/seed.ts";
+import { isRunning, runReconstruction } from "./reconstruction.ts";
+import { activeProvider, placeCall, providerDetail } from "./callProvider.ts";
+import { isDockerAvailable } from "./adapters/sandbox.ts";
+import { brightDataConfigured } from "./adapters/brightdata.ts";
+import * as brain from "./adapters/brain.ts";
 import { llmConfigured } from "./llm.ts";
-import { createDemoIncident, ensureIncident, simulateInterview, splitAccount } from "./demo.ts";
-import { isPlausiblePhone, maskPhone, toE164 } from "./normalize.ts";
-import { CASE_TYPES } from "./types.ts";
+import { isPlausiblePhone, maskPhone } from "./normalize.ts";
+import { CASE_TYPES, type IntegrationStatus, type ParticipantRole } from "./types.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 3000);
-
-// ---------------------------------------------------------------------------
-// Guava is loaded dynamically: the SDK throws at construction when no
-// credentials are present, and a missing key must never stop the dashboard.
-// ---------------------------------------------------------------------------
-type AgentModule = typeof import("./agent.ts");
-let agentModule: AgentModule | null = null;
-let agentError: string | null = null;
-
-async function loadAgent(): Promise<void> {
-  try {
-    agentModule = await import("./agent.ts");
-    agentModule.startInboundListener();
-  } catch (err) {
-    agentError = (err as Error).message;
-    console.warn(
-      "\n[server] Guava agent NOT started — phone calling is disabled.\n" +
-        `         reason: ${agentError}\n` +
-        "         fix: run `guava login`, or set GUAVA_API_KEY, then restart.\n" +
-        "         The dashboard, reconciliation, and simulation still work.\n",
-    );
-  }
-}
-
-function guavaStatus() {
-  return {
-    ready: agentModule !== null,
-    error: agentError,
-    agentNumber: agentModule?.agentNumber() ?? process.env.GUAVA_AGENT_NUMBER ?? null,
-    inbound: Boolean(agentModule && agentModule.agentNumber()),
-  };
-}
+const DEMO_MODE = (process.env.DEMO_MODE ?? "true").toLowerCase() !== "false";
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "4mb" }));
 app.use(express.static(resolve(__dirname, "..", "public")));
 
 // ---------------------------------------------------------------------------
-// Read model — phone numbers are masked before they ever leave the server.
+// Read model
 // ---------------------------------------------------------------------------
 function viewState() {
   const s = store.getState();
   return {
+    demoMode: DEMO_MODE,
     incident: s.incidents[0] ?? null,
-    witnesses: s.witnesses.map((w) => ({
+    participants: s.witnesses.map((w) => ({
       ...w,
       phoneNumber: undefined,
       phoneMasked: w.phoneNumber ? maskPhone(w.phoneNumber) : null,
       hasPhone: Boolean(w.phoneNumber),
     })),
-    interviews: s.interviews.map((i) => ({
-      ...i,
-      simulated: i.fields.simulated === true,
-    })),
+    interviews: s.interviews,
+    // Narrative-position claims are internal ordering evidence, not findings.
     claims: s.claims.filter((c) => c.category !== "narrative"),
     findings: s.findings,
     timeline: s.timeline,
+    evidence: s.evidence,
+    externalSources: s.externalSources,
+    agentActions: s.agentActions.slice(-120),
+    followUps: s.followUps,
+    report: s.report,
+    reconstruction: s.reconstruction,
     reconciliation: s.reconciliation,
-    guava: guavaStatus(),
   };
 }
 
-app.get("/api/state", (_req, res) => {
-  res.json(viewState());
-});
+app.get("/api/state", (_req, res) => res.json(viewState()));
 
 // ---------------------------------------------------------------------------
 // Live updates
@@ -94,7 +71,9 @@ app.get("/api/stream", (req, res) => {
   res.write(`data: ${JSON.stringify({ type: "snapshot", state: viewState() })}\n\n`);
 
   const onChange = (evt: { reason: string }) => {
-    res.write(`data: ${JSON.stringify({ type: "update", reason: evt.reason, state: viewState() })}\n\n`);
+    res.write(
+      `data: ${JSON.stringify({ type: "update", reason: evt.reason, state: viewState() })}\n\n`,
+    );
   };
   store.on("change", onChange);
 
@@ -106,41 +85,68 @@ app.get("/api/stream", (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Commands
+// Integration status — what is genuinely live vs a labelled fallback
 // ---------------------------------------------------------------------------
-app.post("/api/incident/demo", (_req, res) => {
-  const incident = createDemoIncident();
-  res.json({ incident });
+app.get("/api/health", async (_req, res) => {
+  const b = await brain.health();
+  const docker = await isDockerAvailable();
+
+  const integrations: IntegrationStatus[] = [
+    {
+      name: "Cognee",
+      mode: b.cognee.mode,
+      detail: b.reachable ? b.cognee.detail : "brain service not running (npm run brain)",
+    },
+    {
+      name: "Strands",
+      mode: b.strands.mode,
+      detail: b.reachable ? b.strands.detail : "brain service not running (npm run brain)",
+    },
+    {
+      name: "Bright Data",
+      mode: brightDataConfigured() ? "live" : "demo",
+      detail: brightDataConfigured()
+        ? "MCP server via npx @brightdata/mcp"
+        : "no BRIGHTDATA_API_TOKEN — labelled demo fixtures in use",
+    },
+    {
+      name: "Docker Sandbox",
+      mode: docker ? "live" : "demo",
+      detail: docker
+        ? "containerised: no network, read-only root, all capabilities dropped"
+        : "no Docker daemon — restricted local processing, labelled on each item",
+    },
+    {
+      name: "Voice",
+      mode: activeProvider() === "guava" ? "live" : "demo",
+      detail: providerDetail(),
+    },
+    {
+      name: "LLM analysis",
+      mode: llmConfigured() ? "live" : "demo",
+      detail: llmConfigured()
+        ? `openai:${process.env.OPENAI_MODEL ?? "gpt-4o"} cross-checked against the rules engine`
+        : "no OPENAI_API_KEY — deterministic rules engine only",
+    },
+  ];
+
+  res.json({ ok: true, demoMode: DEMO_MODE, integrations, uptime: process.uptime() });
 });
 
-app.get("/api/case-types", (_req, res) => {
-  res.json({ caseTypes: CASE_TYPES });
+app.get("/api/case-types", (_req, res) => res.json({ caseTypes: CASE_TYPES }));
+
+// ---------------------------------------------------------------------------
+// Case management
+// ---------------------------------------------------------------------------
+app.post("/api/demo/reset", (_req, res) => {
+  const incident = seedDemoCase();
+  res.json({ ok: true, incident });
 });
 
-/**
- * Opens a new case with whatever the agency already holds, and optionally
- * registers the witnesses expected to give a statement. Callers who identify
- * themselves as one of those witnesses are matched to the roster.
- */
-app.post("/api/incident", (req, res) => {
+app.post("/api/case", (req, res) => {
   const b = req.body ?? {};
   const title = String(b.title ?? "").trim();
   if (title.length < 3) return res.status(400).json({ error: "A case title is required" });
-
-  const roster: { displayName: string; phoneNumber: string }[] = Array.isArray(b.witnesses)
-    ? b.witnesses
-        .map((w: { displayName?: string; phoneNumber?: string }) => ({
-          displayName: String(w?.displayName ?? "").trim(),
-          phoneNumber: String(w?.phoneNumber ?? "").trim(),
-        }))
-        .filter((w: { displayName: string }) => w.displayName.length > 0)
-    : [];
-
-  for (const w of roster) {
-    if (w.phoneNumber && !isPlausiblePhone(w.phoneNumber)) {
-      return res.status(400).json({ error: `Invalid phone number for ${w.displayName}` });
-    }
-  }
 
   store.reset();
   const incident = store.createIncident({
@@ -153,157 +159,114 @@ app.post("/api/incident", (req, res) => {
     openedBy: String(b.openedBy ?? "").trim(),
     knownContext: String(b.knownContext ?? "").trim(),
   });
-
-  // A roster witness with no number still gets one when a demo fallback is
-  // configured, so "Call witness" is usable without retyping it every time.
-  const fallback = process.env.DEMO_WITNESS_PHONE?.trim() ?? "";
-  for (const w of roster) {
-    store.addWitness(incident.id, w.displayName, w.phoneNumber || fallback);
-  }
-
-  res.json({ incident, witnesses: roster.length });
+  res.json({ ok: true, incident });
 });
 
-app.post("/api/witness", (req, res) => {
-  const { displayName, phoneNumber } = req.body ?? {};
-  const name = String(displayName ?? "").trim();
-  const phone = String(phoneNumber ?? "").trim();
-
-  if (name.length < 1) return res.status(400).json({ error: "displayName is required" });
+app.post("/api/participant", (req, res) => {
+  const b = req.body ?? {};
+  const name = String(b.displayName ?? "").trim();
+  const phone = String(b.phoneNumber ?? "").trim();
+  if (!name) return res.status(400).json({ error: "displayName is required" });
   if (phone && !isPlausiblePhone(phone)) {
-    return res.status(400).json({ error: "phoneNumber must be a valid number, e.g. +14155550123" });
+    return res.status(400).json({ error: "phoneNumber must look like +14155550123" });
   }
 
-  const incident = ensureIncident();
-  const witness = store.addWitness(incident.id, name, phone);
-  res.json({ witnessId: witness.id, phoneMasked: phone ? maskPhone(toE164(phone)) : null });
+  const incident = ensureCase();
+  const w = store.addWitness(
+    incident.id,
+    name,
+    phone,
+    (String(b.role ?? "witness") as ParticipantRole) || "witness",
+    String(b.descriptor ?? "").trim(),
+    String(b.approach ?? "").trim() || undefined,
+  );
+  res.json({ ok: true, participantId: w.id });
 });
 
-app.post("/api/witness/:id/call", async (req, res) => {
-  const witness = store.getWitness(req.params.id);
-  if (!witness) return res.status(404).json({ error: "unknown witness" });
-  if (!agentModule) {
-    return res.status(503).json({
-      error: "Guava agent is not connected. Run `guava login` or set GUAVA_API_KEY, then restart.",
-    });
-  }
-  try {
-    await agentModule.placeOutboundCall(witness.id);
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(502).json({ error: (err as Error).message });
-  }
-});
+app.post("/api/evidence", (req, res) => {
+  const b = req.body ?? {};
+  const filename = String(b.filename ?? "").trim();
+  if (!filename) return res.status(400).json({ error: "filename is required" });
 
-app.post("/api/reconcile", async (_req, res) => {
-  try {
-    const result = await store.runReconciliationSmart();
-    res.json({
-      ok: true,
-      engine: result.engine,
-      counts: {
-        claims: result.claims.length,
-        findings: result.findings.length,
-        timeline: result.timeline.length,
-      },
-    });
-  } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
-  }
-});
-
-/**
- * Records a witness account from text instead of speech. Used to rehearse the
- * dashboard without spending a call; results are labelled "simulated" in the UI.
- */
-app.post("/api/simulate", async (req, res) => {
-  const { displayName, account, followUp } = req.body ?? {};
-  const name = String(displayName ?? "").trim();
-  const text = String(account ?? "").trim();
-  if (!name || text.length < 10) {
-    return res.status(400).json({ error: "displayName and a non-trivial account are required" });
-  }
-  const { witnessId } = simulateInterview(name, splitAccount(text), Boolean(followUp));
-  try {
-    const result = await store.runReconciliationSmart();
-    res.json({ ok: true, witnessId, engine: result.engine });
-  } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
-  }
-});
-
-app.post("/api/reset", (_req, res) => {
-  store.reset();
-  const incident = createDemoIncident();
-  const fallback = process.env.DEMO_WITNESS_PHONE?.trim();
-  if (fallback) {
-    store.addWitness(incident.id, "Witness A", fallback);
-    store.addWitness(incident.id, "Witness B", fallback);
-  }
-  res.json({ ok: true });
-});
-
-/**
- * Moves a question to the front of the queue, so the next witness who calls in
- * is asked it first. This is the "Ask next" action on the dashboard — it works
- * without outbound dialling, which matters when only inbound is available.
- */
-app.post("/api/findings/:id/ask-next", (req, res) => {
-  const finding = store.getState().findings.find((f) => f.id === req.params.id);
-  if (!finding) return res.status(404).json({ error: "unknown finding" });
-
-  const prompt = finding.witnessPrompt ?? finding.followUpQuestion;
-  if (!prompt) {
-    return res.status(400).json({
-      error: "This question cannot be put to a witness without revealing another account.",
-    });
-  }
-  store.queueQuestion(finding.id);
-  res.json({ ok: true, prompt });
-});
-
-/** Clears the case entirely, ready to open a fresh one. */
-app.post("/api/incident/delete", (_req, res) => {
-  store.reset();
-  res.json({ ok: true });
-});
-
-app.get("/api/health", (_req, res) => {
-  res.json({
-    ok: true,
-    guava: guavaStatus(),
-    llm: {
-      configured: llmConfigured(),
-      model: process.env.OPENAI_MODEL ?? "gpt-4o",
+  const incident = ensureCase();
+  const item = store.addEvidence(
+    {
+      kind: (b.kind ?? "other") as never,
+      filename,
+      sizeBytes: Number(b.sizeBytes ?? 0),
+      uploadedAt: new Date().toISOString(),
+      description: String(b.description ?? "").trim(),
+      extracted: null,
+      processedAt: null,
+      processedBy: null,
+      demo: false,
     },
-    uptime: process.uptime(),
-  });
+    incident.id,
+  );
+  res.json({ ok: true, evidence: item });
+});
+
+// ---------------------------------------------------------------------------
+// The main action
+// ---------------------------------------------------------------------------
+app.post("/api/reconstruct", (_req, res) => {
+  if (isRunning()) return res.status(409).json({ error: "A reconstruction is already running" });
+  if (!store.getIncident()) return res.status(400).json({ error: "No case is open" });
+
+  // Fire and forget: the client follows progress over the SSE stream.
+  runReconstruction().catch((err) => console.error("[reconstruct]", err));
+  res.json({ ok: true, started: true });
+});
+
+app.post("/api/participant/:id/call", async (req, res) => {
+  const w = store.getWitness(req.params.id);
+  if (!w) return res.status(404).json({ error: "unknown participant" });
+  const result = await placeCall(w.id);
+  if (!result.ok) return res.status(400).json({ error: result.detail, provider: result.provider });
+  res.json({ ...result, ok: true });
+});
+
+app.post("/api/followups/:id/prioritise", (req, res) => {
+  const f = store.getState().followUps.find((x) => x.id === req.params.id);
+  if (!f) return res.status(404).json({ error: "unknown follow-up" });
+  const items = store
+    .getState()
+    .followUps.map((x) => (x.id === f.id ? { ...x, priority: -1, status: "queued" as const } : x))
+    .sort((a, b) => a.priority - b.priority);
+  store.setFollowUps(items);
+  res.json({ ok: true, question: f.witnessPrompt ?? f.question });
+});
+
+// ---------------------------------------------------------------------------
+// Report
+// ---------------------------------------------------------------------------
+app.get("/api/report.md", (_req, res) => {
+  const report = store.getState().report;
+  if (!report) return res.status(404).send("No report has been generated yet.");
+  const ref = store.getIncident()?.referenceId || "case";
+  res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="blackbox-${ref}.md"`);
+  res.send(report.markdown);
 });
 
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
-ensureIncident();
-
 const server = app.listen(PORT, () => {
+  if (!store.getIncident()) seedDemoCase();
   console.log(`\n  BLACKBOX  ·  http://localhost:${PORT}`);
-  console.log(`  "Every witness has a piece. BlackBox builds the timeline."\n`);
-  void loadAgent();
+  console.log(`  Autonomous incident reconstruction`);
+  console.log(`  demo mode: ${DEMO_MODE ? "on" : "off"} · voice: ${providerDetail()}\n`);
 });
 
 server.on("error", (err: NodeJS.ErrnoException) => {
   if (err.code === "EADDRINUSE") {
     console.error(
-      `\n  Port ${PORT} is already in use — BlackBox is probably running in another terminal.\n` +
-        `  Close it, or start this one on a different port:\n` +
-        `      PowerShell:  $env:PORT=3001; npm run dev\n`,
+      `\n  Port ${PORT} is already in use — BlackBox may be running in another terminal.\n` +
+        `  Close it, or:  $env:PORT=3001; npm run dev\n`,
     );
   } else {
     console.error("[server] failed to start:", err.message);
   }
   process.exit(1);
-});
-
-process.on("unhandledRejection", (err) => {
-  console.error("[server] unhandled rejection:", err);
 });

@@ -3,12 +3,25 @@
 
 export type CallStatus =
   | "queued"
+  | "dialing"
   | "ringing"
   | "live"
+  | "interviewing"
+  | "processing"
   | "completed"
   | "no_answer"
   | "incomplete"
   | "failed";
+
+/** Stages a participant card moves through during a reconstruction. */
+export const CALL_STAGE_ORDER: CallStatus[] = [
+  "queued",
+  "dialing",
+  "ringing",
+  "interviewing",
+  "processing",
+  "completed",
+];
 
 export type ConsentStatus = "unknown" | "granted" | "declined";
 
@@ -56,6 +69,16 @@ export interface Witness {
   interviewStartedAt: string | null;
   interviewCompletedAt: string | null;
   lastError: string | null;
+  /** How this person relates to the incident. */
+  role: ParticipantRole;
+  /** Free-text descriptor shown under the name, e.g. "Black Tesla, northbound". */
+  descriptor: string;
+  /**
+   * Direction of travel or vantage point, taken from the case file rather than
+   * from testimony. Two drivers on different approaches cannot both have had a
+   * green light, and that joint impossibility is only detectable with this.
+   */
+  approach?: string;
 }
 
 export interface TranscriptTurn {
@@ -110,6 +133,15 @@ export interface Claim {
   /** Verbatim slice of what the witness actually said. Provenance is mandatory. */
   sourceExcerpt: string;
   sourceField: string | null;
+  /** Offset into the interview transcript, for audio scrubbing and citation. */
+  transcriptSegmentId?: string;
+  /** Verdict after weighing every account and external source. */
+  classification?: ClaimClassification;
+  /** 0-100 confidence in the classification — never in the speaker's honesty. */
+  analysisConfidence?: number;
+  corroboratingClaimIds?: string[];
+  conflictingClaimIds?: string[];
+  externalEvidenceIds?: string[];
 }
 
 export interface TimelineEvent {
@@ -164,4 +196,179 @@ export interface ReconciliationState {
   error: string | null;
   /** Which analysis path produced the current findings, e.g. "openai:gpt-4o". */
   engine: string;
+}
+
+// ---------------------------------------------------------------------------
+// Case-file extensions
+//
+// The reconciliation engine below still speaks in terms of Incident / Witness /
+// Claim, so those names are kept intact. Everything an investigator-facing case
+// file needs — participants with roles, evidence, external corroboration, the
+// agent audit trail, and the final report — is layered on here.
+// ---------------------------------------------------------------------------
+
+/** An investigation case. Alias of Incident so the engine keeps compiling. */
+export type Case = Incident;
+
+export type ParticipantRole =
+  | "driver"
+  | "passenger"
+  | "pedestrian"
+  | "witness"
+  | "employee"
+  | "first_responder"
+  | "other";
+
+/**
+ * How a claim stands once every account and external source has been weighed.
+ * Deliberately never includes anything resembling "lying" — inconsistency is
+ * not deception, and BlackBox does not assign intent.
+ */
+export type ClaimClassification =
+  | "independently_corroborated"
+  | "supported_by_external_evidence"
+  | "internally_inconsistent"
+  | "contradicted_by_another_claim"
+  | "contradicted_by_external_evidence"
+  | "unresolved"
+  | "requires_follow_up";
+
+export const CLASSIFICATION_LABELS: Record<ClaimClassification, string> = {
+  independently_corroborated: "Independently corroborated",
+  supported_by_external_evidence: "Supported by external evidence",
+  internally_inconsistent: "Internally inconsistent",
+  contradicted_by_another_claim: "Contradicted by another claim",
+  contradicted_by_external_evidence: "Contradicted by external evidence",
+  unresolved: "Unresolved",
+  requires_follow_up: "Requires follow-up",
+};
+
+/** Uploaded material belonging to the case. Raw bytes are never mutated. */
+export interface EvidenceItem {
+  id: string;
+  incidentId: string;
+  kind: "image" | "audio" | "video" | "document" | "data" | "other";
+  filename: string;
+  /** Bytes on disk, when the file was actually uploaded. */
+  sizeBytes: number;
+  uploadedAt: string;
+  description: string;
+  /** Output of the sandboxed processing pass, if it has run. */
+  extracted: Record<string, unknown> | null;
+  processedAt: string | null;
+  /** Which sandbox executed it, for the audit trail. */
+  processedBy: string | null;
+  /** True when this item ships with the seeded demo rather than being uploaded. */
+  demo: boolean;
+}
+
+/** A public web source retrieved to corroborate or challenge a recollection. */
+export interface ExternalSource {
+  id: string;
+  incidentId: string;
+  title: string;
+  url: string;
+  snippet: string;
+  /** Why this was pulled: weather, signals, road layout, news, cameras. */
+  category:
+    | "weather"
+    | "street_layout"
+    | "traffic_signal"
+    | "road_closure"
+    | "nearby_business"
+    | "camera"
+    | "news"
+    | "public_notice"
+    | "other";
+  retrievedAt: string;
+  /** How it bears on the case, in one sentence. */
+  relevance: string;
+  /** Claims this source speaks to. */
+  relatedClaimIds: string[];
+  /** Whether it supports, challenges, or merely contextualises those claims. */
+  bearing: "supports" | "challenges" | "context";
+  /** "brightdata:search_engine" — or "demo_fixture" when running offline. */
+  provider: string;
+}
+
+/** One line in the live agent activity feed. Also the audit trail. */
+export interface AgentAction {
+  id: string;
+  incidentId: string;
+  /** Which agent role acted. */
+  agent:
+    | "orchestrator"
+    | "interviewer"
+    | "claim_analyst"
+    | "contradiction_analyst"
+    | "evidence_researcher"
+    | "report_agent"
+    | "sandbox"
+    | "memory";
+  /** Short imperative summary, e.g. "Extracted 7 claims from Maya Chen". */
+  summary: string;
+  detail: string | null;
+  at: string;
+  status: "running" | "done" | "failed";
+  /** Which backend actually served this: real SDK or labelled fallback. */
+  via: string | null;
+}
+
+export interface FollowUpQuestion {
+  id: string;
+  incidentId: string;
+  question: string;
+  /** Neutral phrasing safe to read to a participant on a live call. */
+  witnessPrompt: string | null;
+  targetParticipantIds: string[];
+  /** The contradiction or gap that produced it. */
+  reason: string;
+  sourceFindingId: string | null;
+  priority: number;
+  status: "open" | "queued" | "asked" | "answered";
+}
+
+export interface ReconstructionReport {
+  id: string;
+  incidentId: string;
+  generatedAt: string;
+  /** Plain-language account of what can and cannot be established. */
+  summary: string;
+  established: string[];
+  disputed: string[];
+  unresolved: string[];
+  recommendedNextAction: string;
+  /** 0-100. Explained in `confidenceBasis`, never shown bare. */
+  confidence: number;
+  confidenceBasis: string;
+  markdown: string;
+}
+
+/** Phases of the reconstruction state machine, in order. */
+export type ReconstructionPhase =
+  | "idle"
+  | "dialing"
+  | "interviewing"
+  | "extracting"
+  | "researching"
+  | "reconciling"
+  | "reporting"
+  | "complete"
+  | "failed";
+
+export interface ReconstructionState {
+  phase: ReconstructionPhase;
+  startedAt: string | null;
+  completedAt: string | null;
+  /** 0-100, for the header progress indicator. */
+  progress: number;
+  message: string;
+  error: string | null;
+}
+
+/** Whether an integration is live or running on a labelled fallback. */
+export interface IntegrationStatus {
+  name: string;
+  mode: "live" | "demo" | "unavailable";
+  detail: string;
 }

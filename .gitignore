@@ -2,3 +2,13 @@ node_modules/
 data/
 .env
 *.log
+
+# Python brain service
+brain/.venv/
+brain/__pycache__/
+__pycache__/
+
+# Cognee writes its graph + vector store outside the repo by default
+# (~/.blackbox-cognee); this covers the case where it is pointed in here.
+.cognee_system/
+.blackbox-cognee/

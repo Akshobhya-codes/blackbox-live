@@ -25,6 +25,10 @@ export const ENTITIES: LexEntry[] = [
   { key: "alarm", label: "Alarm", patterns: [/\balarms?\b/, /\bsirens?\b/, /\bbuzzers?\b/] },
   { key: "truck", label: "Truck", patterns: [/\btrucks?\b/, /\btrailers?\b/] },
   { key: "car", label: "Car", patterns: [/\bcars?\b/, /\bsedans?\b/, /\bhatchbacks?\b/] },
+  // Named makes are separate entities, otherwise "black Tesla" and "white Honda"
+  // both collapse to `car` and read as a colour contradiction about one vehicle.
+  { key: "tesla", label: "Tesla", patterns: [/\bteslas?\b/] },
+  { key: "honda", label: "Honda", patterns: [/\bhondas?\b/] },
   { key: "van", label: "Van", patterns: [/\bvans?\b/, /\bminivans?\b/] },
   {
     key: "motorcycle",

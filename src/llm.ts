@@ -10,7 +10,9 @@ import type { Claim, Finding, Incident, Interview, TimelineEvent, Witness } from
 
 const DEFAULT_MODEL = process.env.OPENAI_MODEL?.trim() || "gpt-4o";
 const FALLBACK_MODEL = "gpt-4o-mini";
-const TIMEOUT_MS = 60_000;
+// Kept deliberately tight: on a flaky venue network a slow model must degrade
+// to the rules engine in seconds, not stall a live reconstruction for minutes.
+const TIMEOUT_MS = 20_000;
 
 export function llmConfigured(): boolean {
   return Boolean(process.env.OPENAI_API_KEY?.trim());
@@ -400,7 +402,7 @@ function mapAnalysis(
       witnessId: c.witnessId,
       category: c.category,
       subject: canonical(c.subject),
-      predicate: c.predicate,
+      predicate: canonicalPredicate(c.predicate),
       object: canonical(c.object),
       displayObject: c.displayObject,
       normalizedTime: null,
@@ -506,6 +508,29 @@ const CANON: Record<string, string> = {
   pedestrian: "pedestrian_present", crosswalk: "pedestrian_present",
   colour: "color",
 };
+
+/**
+ * Predicates the model reaches for that mean the same thing as ours. Without
+ * this, "signal state" and "signal colour" look like two separate disputes and
+ * the board shows the same conflict twice.
+ */
+const CANON_PREDICATE: Record<string, string> = {
+  state: "color",
+  colour: "color",
+  signal_state: "color",
+  light_state: "color",
+  appearance: "color",
+  sequence: "before",
+  order: "before",
+  preceded: "before",
+  occurred: "occurred_at",
+  time: "occurred_at",
+};
+
+function canonicalPredicate(value: string): string {
+  const key = value.trim().toLowerCase().replace(/s+/g, "_");
+  return CANON_PREDICATE[key] ?? key;
+}
 
 function canonical(value: string): string {
   const key = value.trim().toLowerCase().replace(/\s+/g, "_");

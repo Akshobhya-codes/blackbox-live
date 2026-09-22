@@ -165,6 +165,37 @@ export function isNegatedBefore(text: string, mentionIndex: number): boolean {
   return matchesAny(prefix, NEGATION_MARKERS);
 }
 
+/**
+ * Which of these mentions a negation actually applies to.
+ *
+ * A cue negates only the first event mention that follows it, and its reach
+ * stops at a clause boundary. In "I did not hear a horn before the impact"
+ * the horn is negated and the impact is not — the old rule negated both and
+ * produced a witness who appeared to deny the collision itself.
+ */
+export function negatedMentions(text: string, mentions: Mention[]): Set<number> {
+  const negated = new Set<number>();
+  if (mentions.length === 0) return negated;
+
+  for (const pattern of NEGATION_MARKERS) {
+    const re = new RegExp(pattern.source, 'g');
+    let cue: RegExpExecArray | null;
+    while ((cue = re.exec(text)) !== null) {
+      const start = cue.index + cue[0].length;
+      const target = mentions
+        .filter((m) => m.index >= start)
+        .sort((a, b) => a.index - b.index)[0];
+      if (!target) continue;
+      // A subordinating boundary ends the negation's reach.
+      const between = text.slice(start, target.index);
+      if (/\b(before|after|when|while|then|but|because|though)\b|[,;]/.test(between)) continue;
+      negated.add(target.index);
+      if (cue.index === re.lastIndex) re.lastIndex++;
+    }
+  }
+  return negated;
+}
+
 export function certaintyOf(text: string): Certainty {
   if (matchesAny(text, HEARSAY_MARKERS)) return "low";
   if (matchesAny(text, UNCERTAINTY_MARKERS)) return "medium";

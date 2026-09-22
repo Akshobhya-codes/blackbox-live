@@ -36,6 +36,8 @@ function mkWitness(id: string, displayName: string): Witness {
     interviewStartedAt: new Date().toISOString(),
     interviewCompletedAt: new Date().toISOString(),
     lastError: null,
+    role: "witness",
+    descriptor: "",
   };
 }
 

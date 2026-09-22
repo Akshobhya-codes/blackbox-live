@@ -15,6 +15,7 @@ import { mergeAnalyses, reconcile } from "./reconcile.ts";
 import { analyzeWithLLM, llmConfigured } from "./llm.ts";
 import { processEvidence } from "./adapters/sandbox.ts";
 import * as brightdata from "./adapters/brightdata.ts";
+import { fetchWeather } from "./adapters/weather.ts";
 import * as brain from "./adapters/brain.ts";
 import { BB204_EXTERNAL_FIXTURES, bb204Queries } from "./cases/bb204.ts";
 import type {
@@ -167,6 +168,37 @@ export async function analyzeCase(): Promise<void> {
 
 /** Guards against two calls racing the same one-time research pass. */
 let researchInFlight = false;
+
+/**
+ * Rules-only re-analysis, cheap enough to run mid-call.
+ *
+ * No model, no report, no network — just extraction and reconciliation over
+ * the transcript captured so far, so the board moves while the witness is
+ * still talking. The full pass runs when the call ends.
+ */
+export function analyzeCaseFast(): void {
+  const incident = store.getIncident();
+  if (!incident) return;
+
+  const claims: Claim[] = [];
+  for (const interview of store.liveInterviews()) {
+    try {
+      claims.push(...extractClaims(interview, incident, interview.witnessId));
+    } catch {
+      // One malformed partial transcript must not stall a live call.
+    }
+  }
+  if (claims.length === 0) return;
+
+  const witnesses = store.getState().witnesses;
+  const { findings, timeline } = reconcile(claims, witnesses, incident);
+  store.applyAnalysis(
+    classify(claims, findings, store.getState().externalSources),
+    findings,
+    timeline,
+    "rules engine (live)",
+  );
+}
 
 // ---------------------------------------------------------------------- memory
 
@@ -383,6 +415,35 @@ async function researchContext(incident: Incident): Promise<ExternalSource[]> {
     }));
   }
 
+  // An independent observation for the hour of the incident. This is the
+  // one source that can settle a claim outright rather than just inform it,
+  // so it carries a factKey the reconciler checks answers against.
+  if (brightdata.brightDataConfigured()) {
+    const wx = await fetchWeather(incident.location, incident.approximateTime);
+    if (wx) {
+      sources.push({
+        incidentId: incident.id,
+        title: `Weather observation — ${incident.location.split(",").pop()?.trim()} at ${wx.observedAt}`,
+        url: wx.sourceUrl,
+        snippet:
+          `${wx.description}` +
+          (wx.tempC !== null ? `, ${wx.tempC} C` : "") +
+          (wx.visibilityKm !== null ? `, visibility ${wx.visibilityKm} km` : "") +
+          (wx.precipMM !== null ? `, precipitation ${wx.precipMM} mm` : ""),
+        category: "weather",
+        retrievedAt: new Date().toISOString(),
+        relevance:
+          `Independent record of conditions at the reported time. Witness answers ` +
+          `about weather and road surface are checked against this.`,
+        relatedClaimIds: [],
+        bearing: "context",
+        provider: "brightdata:scrape_as_markdown",
+        factKey: "weather.condition",
+        factValue: wx.condition,
+      });
+    }
+  }
+
   const saved = sources.map((s) => store.addExternalSource(s));
   store.finishAction(
     id,
@@ -489,7 +550,7 @@ async function reconcileAll(
       incidentId: incident.id,
       question: f.title,
       witnessPrompt: f.witnessPrompt ?? null,
-      targetParticipantIds: f.involvedWitnessIds,
+      targetParticipantIds: whoToAsk(f, witnesses),
       reason: f.explanation,
       sourceFindingId: f.id,
       priority: f.askPriority ?? 5,
@@ -503,6 +564,31 @@ async function reconcileAll(
       "Each is phrased so it can be asked without revealing what another participant said.",
   });
   await sleep(PACE.step);
+}
+
+/**
+ * Who a question should actually be put to.
+ *
+ * The finding records who a gap came *from*, which is nearly always the wrong
+ * person to ask. If only Priya mentioned a chemical smell, asking Priya about
+ * it again learns nothing — the value is in asking everyone who has not spoken
+ * to it. A contradiction is the exception: there the people involved are
+ * precisely the ones who can clarify their own account.
+ */
+function whoToAsk(
+  finding: { explanation: string; involvedWitnessIds: string[] },
+  witnesses: Witness[],
+): string[] {
+  const involved = new Set(finding.involvedWitnessIds);
+  const fromConflict = /unresolved conflict|cannot all be true|two different values/i.test(
+    finding.explanation,
+  );
+  if (fromConflict) return [...involved];
+
+  const others = witnesses.filter((w) => !involved.has(w.id)).map((w) => w.id);
+  // With nobody else on the roster yet, the question waits for the next person
+  // added rather than being pointlessly aimed back at its own source.
+  return others.length > 0 ? others : [];
 }
 
 /**
@@ -548,6 +634,27 @@ function classify(
 
     let classification: Claim["classification"];
     let confidence: number;
+
+    // An authoritative record outranks a show of hands. If a source states
+    // the fact this claim is about, it settles it either way — and a witness
+    // whose recollection does not match is mistaken on that point, which is
+    // not the same thing as being untruthful.
+    const verdict = sources.find(
+      (s) => s.factKey && s.factKey === `${c.subject}.${c.predicate}` && s.factValue,
+    );
+    if (verdict) {
+      const agrees = verdict.factValue === c.object;
+      return {
+        ...c,
+        classification: agrees
+          ? "supported_by_external_evidence"
+          : "contradicted_by_external_evidence",
+        analysisConfidence: agrees ? 90 : 25,
+        corroboratingClaimIds: [...(corroborated.get(c.id) ?? [])],
+        conflictingClaimIds: [...(conflicting.get(c.id) ?? [])],
+        externalEvidenceIds: [verdict.id],
+      };
+    }
 
     if (inconsistent.has(c.id)) {
       classification = "internally_inconsistent";

@@ -463,6 +463,18 @@ class Store extends EventEmitter {
     }
   }
 
+  /**
+   * Interviews worth analysing right now, including one still in progress.
+   * Used mid-call so a partial account already shows on the board.
+   */
+  liveInterviews(): Interview[] {
+    return this.data.interviews.filter(
+      (i) =>
+        i.completionStatus !== "failed" &&
+        i.transcript.some((t) => t.speaker === "witness"),
+    );
+  }
+
   /** Interviews with enough content to analyse. */
   usableInterviews(): Interview[] {
     return this.data.interviews.filter(

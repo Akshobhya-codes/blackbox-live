@@ -334,6 +334,16 @@ async function startVoice(): Promise<void> {
   }
 }
 
+// A live investigation must survive a misbehaving integration. A broken pipe
+// from a child process, or a rejection nobody caught, should cost us that one
+// operation — not the server someone is mid-interview on.
+process.on("uncaughtException", (err) => {
+  console.error("[server] uncaught:", err?.message ?? err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[server] unhandled rejection:", (reason as Error)?.message ?? reason);
+});
+
 const server = app.listen(PORT, () => {
   if (!store.getIncident()) seedDemoCase();
   void startVoice();

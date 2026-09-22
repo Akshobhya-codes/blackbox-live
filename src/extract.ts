@@ -7,6 +7,7 @@ import {
   DIRECTIONS,
   DIRECTION_ALIASES,
   ENTITIES,
+  ENVIRONMENT_PATTERNS,
   EVENTS,
   PLACE_PATTERNS,
   entityLabel,
@@ -38,6 +39,10 @@ const NARRATIVE_FIELDS = [
   "sounds_alarms_smells",
   "injuries_or_danger",
   "certainty_notes",
+  "conditions_weather",
+  "conditions_light",
+  "sequence_entry",
+  "speed_impression",
   "observer_location",
   "additional_details",
 ];
@@ -197,6 +202,27 @@ export function extractClaims(
         }
       }
 
+      // Conditions at the scene. Recorded as ordinary claims so they are
+      // compared across accounts like anything else — and, because a weather
+      // record can settle them, they are the claims most worth checking.
+      for (const env of ENVIRONMENT_PATTERNS) {
+        const m = new RegExp(env.re.source).exec(seg.text);
+        if (!m) continue;
+        if (isNegatedBefore(seg.text, m.index)) continue;
+        push({
+          category: "attribute",
+          subject: env.subject,
+          predicate: env.predicate,
+          object: env.value,
+          displayObject: env.subject + ": " + env.value,
+          normalizedTime: null,
+          temporalRelation: null,
+          certainty,
+          sourceExcerpt: excerpt(seg.raw),
+          sourceField: unit.field,
+        });
+      }
+
       const minutes = parseClockTime(seg.text, pmBias);
       if (minutes !== null) {
         push({
@@ -229,6 +255,25 @@ export function extractClaims(
         });
       }
     }
+  }
+
+  // What they believe happened, kept strictly apart from what they saw.
+  // Investigators want it; the comparison engine must never treat it as
+  // evidence, so it is stored as an inference and nothing else reads it.
+  const opinion = interview.fields.believed_at_fault;
+  if (typeof opinion === "string" && opinion.trim().length > 2) {
+    push({
+      category: "inference",
+      subject: "fault",
+      predicate: "believed_by_speaker",
+      object: opinion.trim().toLowerCase().slice(0, 60),
+      displayObject: opinion.trim(),
+      normalizedTime: null,
+      temporalRelation: null,
+      certainty: "low",
+      sourceExcerpt: excerpt(opinion.trim()),
+      sourceField: "believed_at_fault",
+    });
   }
 
   // --- Temporal ordering from the narrative flow ---

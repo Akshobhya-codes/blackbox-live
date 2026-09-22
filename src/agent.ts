@@ -19,7 +19,7 @@ const TASK_IDENTIFY = "identify_witness";
 const TASK_INTERVIEW = "witness_interview";
 
 /** Follow-up questions per call, so the interview stays inside two minutes. */
-const MAX_QUESTIONS_NEW = 3;
+const MAX_QUESTIONS_NEW = 2;
 const MAX_QUESTIONS_FOLLOWUP = 3;
 
 interface CallState {
@@ -88,56 +88,47 @@ function identifyChecklist(incident: Incident) {
 // Task 2 — the interview itself
 // ---------------------------------------------------------------------------
 
+/**
+ * The core of a first interview.
+ *
+ * Deliberately short. The open account in `first_observation` already
+ * captures vehicles, sounds and sequence when someone is allowed to talk,
+ * so the remaining fields are only the ones that decide right of way or
+ * that an outside record can verify. Everything else is better obtained
+ * from a targeted follow-up once the conflicts are known.
+ */
 const BASE_FIELDS = () => [
   guava.Field({
     key: "observer_location",
     fieldType: "text",
-    question: "Where were you when you first noticed something unusual?",
+    question: "Where were you when it happened?",
     description:
-      "The witness's own physical position. Do not suggest a location, even if one is known.",
+      "Their own position. Never suggest a location, even one already on file.",
     required: true,
   }),
   guava.Field({
     key: "first_observation",
     fieldType: "text",
-    question: "Please describe, in your own words, what you first noticed.",
+    question: "Tell me in your own words what you saw and heard.",
     description:
-      "The witness's opening account, in their own words. Let them speak without interruption.",
+      "The open account, and the most valuable thing in the call. Let them run without interruption — most of the vehicles, sounds and sequence come out here, and anything they cover need not be asked again.",
     required: true,
   }),
   guava.Field({
-    key: "sequence_after",
+    key: "sequence_entry",
     fieldType: "text",
-    question: "What happened next?",
+    question: "Which vehicle entered the intersection first, as far as you could tell?",
     description:
-      "The order of events after the first observation. Ask only open questions such as " +
-      "'what happened next'. Never propose an order.",
+      "Order of entry — the single most decisive fact for right of way. Accept 'I could not tell' as a complete answer and move on.",
     required: true,
   }),
   guava.Field({
-    key: "objects_and_vehicles",
+    key: "conditions_weather",
     fieldType: "text",
-    question: "What people, vehicles, or equipment did you see, and how would you describe them?",
+    question: "What were the conditions — the weather, and was the road wet or dry?",
     description:
-      "Descriptions including appearance and colour. Never name a colour or vehicle type " +
-      "yourself — ask the witness to describe it.",
+      "One of the few answers an independent weather record can check outright. Ask open; never name a condition first.",
     required: true,
-  }),
-  guava.Field({
-    key: "sounds_alarms_smells",
-    fieldType: "text",
-    question: "What did you hear or smell, if anything?",
-    description:
-      "Sounds, alarms, smells, smoke, or hazards the witness personally detected. " +
-      "Accept 'nothing' as a complete answer and record it as such.",
-    required: true,
-  }),
-  guava.Field({
-    key: "injuries_or_danger",
-    fieldType: "text",
-    question: "Was anyone injured or in immediate danger, as far as you saw?",
-    description: "Injuries or immediate danger. A short answer is fine.",
-    required: false,
   }),
 ];
 
@@ -184,14 +175,20 @@ function interviewChecklist(followUp: boolean, questions: { key: string; prompt:
     ...BASE_FIELDS(),
     ...followUps,
     guava.Field({
-      key: "certainty_notes",
+      key: "believed_at_fault",
       fieldType: "text",
-      question: "Which parts are you certain about, and which parts are estimates?",
-      description: "Separates direct observation from estimation or hearsay.",
+      question:
+        "From what you personally saw, do you have a view on which vehicle " +
+        "entered against the signal? It is fine to say you do not know.",
+      description:
+        "Their interpretation, recorded separately from what they observed. Ask it last, after every factual question, so it cannot colour the account. Make clear that 'I don't know' is a complete answer and never press for a name. Record the reasoning they give, not just the conclusion.",
       required: false,
     }),
-    "Briefly summarise the key facts back to the witness in two or three sentences, using only " +
-      "what they actually said. Do not add detail they did not give.",
+    // No separate certainty question: the analysis already reads hedges like
+    // "I think" and "it looked" straight out of how someone speaks, so asking
+    // costs call time and returns what we already have.
+    "Briefly read the key facts back in two or three sentences, using only what they " +
+      "actually said. Do not add detail they did not give, and keep it brief.",
     guava.Field({
       key: "summary_confirmed",
       fieldType: "multiple_choice",
@@ -208,6 +205,10 @@ const OBJECTIVE = (incident: Incident, followUp: boolean) =>
   `"${incident.title}" at ${incident.location}, reported around ${incident.approximateTime}. ` +
   `${followUp ? "This is a FOLLOW-UP call with someone who has already given a statement. Keep it under 90 seconds." : "Work through the checklist one question at a time. Keep the whole call under two minutes."} ` +
   `Be calm, concise, and strictly neutral.\n\n` +
+  `KEEP IT SHORT. Aim for ninety seconds. If the witness has already covered ` +
+  `something in their own account, do NOT ask it again — mark it answered and ` +
+  `move on. Never pad the call. When the checklist is done, read back and end ` +
+  `the call promptly; another witness is waiting.\n\n` +
   (incident.knownContext
     ? `Background already held by investigators — for your context ONLY. Never recite it, ` +
       `never use it to prompt, correct, or contradict the witness, and never let them hear it:\n` +
@@ -378,6 +379,26 @@ agent.onTaskComplete(TASK_IDENTIFY, async (call) => {
   });
 });
 
+/**
+ * Re-analyses shortly after the caller stops talking.
+ *
+ * Debounced rather than per-utterance: Guava refines an utterance several
+ * times as it is recognised, and re-running on every revision would burn CPU
+ * re-deriving the same claims. A second and a half of quiet means they have
+ * finished a thought, which is the right moment to update the board.
+ */
+let liveTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleLiveAnalysis(): void {
+  if (liveTimer) clearTimeout(liveTimer);
+  liveTimer = setTimeout(() => {
+    liveTimer = null;
+    import("./reconstruction.ts")
+      .then((m) => m.analyzeCaseFast())
+      .catch((err) => console.warn("[agent] live analysis skipped:", (err as Error).message));
+  }, 1500);
+}
+
 agent.onCallerSpeech(async (call, event) => {
   const state = activeCalls.get(call.id);
   if (!state || !event.utterance.trim()) return;
@@ -387,8 +408,13 @@ agent.onCallerSpeech(async (call, event) => {
     at: new Date().toISOString(),
     utteranceId: event.utterance_id,
   };
-  if (state.interviewId) store.appendTurn(state.interviewId, turn);
-  else state.buffer.push(turn);
+  if (state.interviewId) {
+    store.appendTurn(state.interviewId, turn);
+    // The board should move while they are still on the line.
+    scheduleLiveAnalysis();
+  } else {
+    state.buffer.push(turn);
+  }
 });
 
 agent.onAgentSpeech(async (call, event) => {

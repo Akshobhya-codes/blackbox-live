@@ -93,10 +93,8 @@ export const EVENTS: LexEntry[] = [
     patterns: [
       /\balarms?\b/,
       /\bsirens?\b/,
-      /\bwent off\b/,
-      /\bgoing off\b/,
-      /\bsounded\b/,
       /\bbuzzers?\b/,
+      /\bklaxons?\b/,
     ],
   },
   {
@@ -177,11 +175,227 @@ export const EVENTS: LexEntry[] = [
     noun: "an airbag deploying",
     patterns: [/\bair\s?bags?\b/],
   },
+  {
+    key: "vehicle_approach",
+    label: "Vehicle approaches",
+    noun: "the vehicle approaching",
+    patterns: [/\bapproach(?:es|ed|ing)?\b/, /\bcoming (?:up|down|along|toward)\b/, /\bcame (?:up|down|along)\b/, /\bheading (?:north|south|east|west|toward)/, /\bdriving (?:north|south|east|west|toward)/],
+  },
+  {
+    key: "entered_intersection",
+    label: "Vehicle enters the intersection",
+    noun: "entering the intersection",
+    patterns: [/\benter(?:s|ed|ing)? the intersection\b/, /\binto the intersection\b/, /\bthrough the intersection\b/, /\bcross(?:ed|ing)? the intersection\b/, /\bpulled out\b/],
+  },
+  {
+    key: "signal_change",
+    label: "Traffic signal changes",
+    noun: "the signal changing",
+    patterns: [/\blight chang(?:e|ed|ing)\b/, /\bsignal chang(?:e|ed|ing)\b/, /\bchang(?:e|ed|ing) to (?:red|green|amber|yellow)\b/, /\bturn(?:s|ed|ing)? (?:red|green|amber|yellow)\b/, /\bwent (?:red|green|amber)\b/],
+  },
+  {
+    key: "swerve",
+    label: "Vehicle swerves",
+    noun: "a swerve",
+    patterns: [/\bswerv(?:e|es|ed|ing)\b/, /\bveer(?:s|ed|ing)?\b/, /\bcut across\b/],
+  },
+  {
+    key: "acceleration",
+    label: "Vehicle accelerates",
+    noun: "the vehicle accelerating",
+    patterns: [/\baccelerat(?:e|es|ed|ing)\b/, /\bsped up\b/, /\bspeeding up\b/, /\bgunned it\b/],
+  },
+  {
+    key: "spin",
+    label: "Vehicle spins or is pushed round",
+    noun: "the vehicle spinning",
+    patterns: [/\bspun\b/, /\bspin(?:s|ning)?\b/, /\brotat(?:e|ed|ing)\b/, /\bpushed (?:round|around|sideways)\b/],
+  },
+  {
+    key: "came_to_rest",
+    label: "Vehicles come to rest",
+    noun: "the vehicles coming to rest",
+    patterns: [/\bcame to (?:a )?(?:rest|stop|halt)\b/, /\bended up\b/, /\bcame to standstill\b/],
+  },
+  {
+    key: "debris",
+    label: "Debris or broken glass",
+    noun: "debris or broken glass",
+    patterns: [/\bdebris\b/, /\bbroken glass\b/, /\bglass (?:everywhere|on the road|shattered)\b/, /\bbumper (?:came off|fell)\b/],
+  },
+  {
+    key: "exited_vehicle",
+    label: "Someone gets out of a vehicle",
+    noun: "someone getting out of a vehicle",
+    patterns: [/\bgot out\b/, /\bclimbed out\b/, /\bstepped out\b/, /\bget(?:ting)? out of the (?:car|vehicle)\b/],
+  },
+  {
+    key: "injury_observed",
+    label: "Someone appears injured",
+    noun: "anyone appearing injured",
+    patterns: [/\binjur(?:y|ed|ies)\b/, /\bbleeding\b/, /\bunconscious\b/, /\bholding (?:his|her|their) (?:neck|head|arm)\b/, /\blimping\b/],
+  },
+  {
+    key: "emergency_services",
+    label: "Emergency services arrive",
+    noun: "police or an ambulance arriving",
+    patterns: [/\bpolice\b/, /\bambulance\b/, /\bparamedics?\b/, /\bfire (?:truck|engine|crew)\b/, /\bfirst responders?\b/],
+  },
+  {
+    key: "called_emergency",
+    label: "Emergency call placed",
+    noun: "someone calling for help",
+    patterns: [/\bcalled 911\b/, /\bcall(?:ed|ing)? (?:the )?(?:police|an ambulance|for help)\b/, /\bdialled 911\b/],
+  },
+  {
+    key: "bystanders",
+    label: "Bystanders gather",
+    noun: "people gathering at the scene",
+    patterns: [/\bbystanders?\b/, /\bcrowd\b/, /\bpeople (?:gathered|ran over|came over)\b/, /\bonlookers?\b/],
+  },
 ];
 
-/** Attributes that are mutually exclusive — two different values is a real conflict. */
-export const EXCLUSIVE_PREDICATES = new Set(["color", "direction", "count", "place_id"]);
 
+/**
+ * Where each event normally falls in an incident, lowest first.
+ *
+ * Used only to order events nobody sequenced explicitly. Anything a witness
+ * actually ordered wins over this, and a contested ordering is still shown
+ * as disputed wherever the event lands.
+ */
+export const EVENT_PHASE: Record<string, number> = {
+  vehicle_approach: 10,
+  signal_change: 15,
+  entered_intersection: 20,
+  acceleration: 25,
+  swerve: 30,
+  braking: 35,
+  horn: 40,
+  shouting: 42,
+  collision: 50,
+  rack_collapse: 52,
+  alarm: 55,
+  spin: 58,
+  came_to_rest: 60,
+  airbag: 62,
+  debris: 65,
+  smoke: 66,
+  fire: 67,
+  steam: 68,
+  spill: 69,
+  chemical_smell: 70,
+  exited_vehicle: 72,
+  injury_observed: 75,
+  pedestrian_present: 76,
+  called_emergency: 80,
+  bystanders: 85,
+  emergency_services: 90,
+  evacuation: 95,
+};
+
+export function eventPhase(key: string): number {
+  return EVENT_PHASE[key] ?? 50;
+}
+
+/**
+ * How much answering this would move the case forward, 0-3.
+ *
+ * Governs which gaps become questions for a live caller. A witness will sit
+ * through three or four questions, so they must be the ones that bear on
+ * right of way, sequence, or causation — not details a vehicle report or a
+ * scene photograph already settles.
+ */
+export const EVENT_MATERIALITY: Record<string, number> = {
+  signal_change: 3,
+  entered_intersection: 3,
+  acceleration: 3,
+  braking: 3,
+  swerve: 3,
+  horn: 3,
+  pedestrian_present: 3,
+  collision: 2,
+  vehicle_approach: 2,
+  injury_observed: 2,
+  shouting: 2,
+  alarm: 2,
+  rack_collapse: 2,
+  smoke: 2,
+  fire: 2,
+  spill: 2,
+  chemical_smell: 2,
+  spin: 1,
+  came_to_rest: 1,
+  debris: 1,
+  called_emergency: 1,
+  bystanders: 1,
+  steam: 1,
+  evacuation: 1,
+  airbag: 0,
+  exited_vehicle: 0,
+  emergency_services: 0,
+};
+
+/** Conditions are always material: they bear on braking and visibility,
+ *  and unlike most testimony an independent record can settle them. */
+export const ATTRIBUTE_MATERIALITY: Record<string, number> = {
+  "conditions.surface": 3,
+  "weather.condition": 3,
+  "visibility.ambient": 3,
+};
+
+export function eventMateriality(key: string): number {
+  return EVENT_MATERIALITY[key] ?? 2;
+}
+
+export function attributeMateriality(subject: string, predicate: string): number {
+  const known = ATTRIBUTE_MATERIALITY[subject + "." + predicate];
+  if (known !== undefined) return known;
+  // Vehicle identification helps place who was where; direction is causal.
+  if (predicate === "direction") return 3;
+  if (predicate === "color" || predicate === "place_id") return 2;
+  return 1;
+}
+/** Attributes that are mutually exclusive — two different values is a real conflict. */
+export const EXCLUSIVE_PREDICATES = new Set([
+  "color",
+  "direction",
+  "count",
+  "place_id",
+  // Environmental state is mutually exclusive and, unlike most testimony,
+  // independently checkable against a weather record.
+  "surface",
+  "condition",
+  "ambient",
+]);
+
+
+/**
+ * Conditions at the scene: road surface, weather, and light level.
+ *
+ * Kept out of the entity/attribute machinery on purpose — "light" already
+ * means the traffic signal, and binding "dark" to the nearest noun would
+ * produce nonsense. Each entry maps straight to subject.predicate = value.
+ */
+export interface EnvPattern {
+  subject: string;
+  predicate: string;
+  value: string;
+  re: RegExp;
+}
+
+export const ENVIRONMENT_PATTERNS: EnvPattern[] = [
+  { subject: "conditions", predicate: "surface", value: "wet", re: /\b(?:wet|slick|slippery)\b/ },
+  { subject: "conditions", predicate: "surface", value: "dry", re: /\bdry\b/ },
+  { subject: "conditions", predicate: "surface", value: "icy", re: /\b(?:icy|ice)\b/ },
+  { subject: "weather", predicate: "condition", value: "rain", re: /\b(?:rain|raining|rained|rainy|drizzl(?:e|ing)|downpour)\b/ },
+  { subject: "weather", predicate: "condition", value: "clear", re: /\b(?:clear|sunny|fine weather)\b/ },
+  { subject: "weather", predicate: "condition", value: "fog", re: /\b(?:fog|foggy|mist|misty|haze)\b/ },
+  { subject: "weather", predicate: "condition", value: "cloudy", re: /\b(?:overcast|cloudy)\b/ },
+  { subject: "weather", predicate: "condition", value: "snow", re: /\b(?:snow|snowing|sleet)\b/ },
+  { subject: "visibility", predicate: "ambient", value: "dark", re: /\b(?:dark|night ?time|pitch black)\b/ },
+  { subject: "visibility", predicate: "ambient", value: "daylight", re: /\b(?:daylight|broad daylight|still light out)\b/ },
+  { subject: "visibility", predicate: "ambient", value: "dusk", re: /\b(?:dusk|twilight|getting dark)\b/ },
+];
 export const COLORS = [
   "blue",
   "yellow",

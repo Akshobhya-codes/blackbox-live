@@ -20,6 +20,7 @@ export function ParticipantRail({
   onFocus,
   onTranscript,
   onCall,
+  onAdd,
 }: {
   state: AppState;
   meta: Map<string, ParticipantMeta>;
@@ -27,12 +28,16 @@ export function ParticipantRail({
   onFocus: (id: string | null) => void;
   onTranscript: (p: Participant) => void;
   onCall: (id: string, name: string) => void;
+  onAdd: () => void;
 }) {
   return (
     <aside className="rail">
       <div className="rail-head">
         <span>PARTICIPANTS</span>
         <span className="count">{state.participants.length}</span>
+        <button className="rail-add" onClick={onAdd} title="Add a witness to this case">
+          +
+        </button>
       </div>
       <div className="rail-list">
         {state.participants.map((p) => {

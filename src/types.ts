@@ -111,7 +111,14 @@ export type ClaimCategory =
   | "presence"
   | "location"
   | "injury"
-  | "narrative";
+  | "narrative"
+  /**
+   * What a participant believes happened, as opposed to what they saw.
+   * Recorded because investigators need it, and kept strictly apart from
+   * observation: an inference never corroborates anything, never
+   * contradicts anything, and is never evidence of fault.
+   */
+  | "inference";
 
 export interface Claim {
   id: string;
@@ -289,6 +296,14 @@ export interface ExternalSource {
   bearing: "supports" | "challenges" | "context";
   /** "brightdata:search_engine" — or "demo_fixture" when running offline. */
   provider: string;
+  /**
+   * A claim this source settles outright, as subject.predicate — for
+   * example "weather.condition". Only set when the source is authoritative
+   * on that fact, which is what lets a claim be marked contradicted by
+   * external evidence rather than merely disputed by another person.
+   */
+  factKey?: string;
+  factValue?: string;
 }
 
 /** One line in the live agent activity feed. Also the audit trail. */

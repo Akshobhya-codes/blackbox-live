@@ -171,6 +171,8 @@ export interface ExternalSource {
   relatedClaimIds: string[];
   bearing: "supports" | "challenges" | "context";
   provider: string;
+  factKey?: string;
+  factValue?: string;
 }
 
 export interface AgentAction {

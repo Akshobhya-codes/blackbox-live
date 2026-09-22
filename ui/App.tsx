@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import Timeline from "./components/Timeline";
 import Contradictions from "./components/Contradictions";
 import CaseLibrary from "./components/CaseLibrary";
+import Questions, { AddWitnessForm } from "./components/Questions";
 import {
   ActivityFeed,
   EvidenceView,
@@ -16,13 +17,21 @@ import { counts, participantMeta } from "./lib/view";
 import { EMPTY_STATE, type AppState, type Finding, type IntegrationStatus, type Participant } from "./lib/types";
 import "./styles.css";
 
-type Tab = "cases" | "overview" | "timeline" | "contradictions" | "evidence" | "report";
+type Tab =
+  | "cases"
+  | "overview"
+  | "timeline"
+  | "contradictions"
+  | "questions"
+  | "evidence"
+  | "report";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "cases", label: "Cases" },
   { id: "overview", label: "Overview" },
   { id: "timeline", label: "Timeline" },
   { id: "contradictions", label: "Contradictions" },
+  { id: "questions", label: "Questions" },
   { id: "evidence", label: "Evidence" },
   { id: "report", label: "Final Report" },
 ];
@@ -34,6 +43,7 @@ export default function App() {
   const [focus, setFocus] = useState<string | null>(null);
   const [selected, setSelected] = useState<Finding | null>(null);
   const [transcript, setTranscript] = useState<Participant | null>(null);
+  const [addingWitness, setAddingWitness] = useState(false);
   const [integrations, setIntegrations] = useState<IntegrationStatus[]>([]);
   const [voiceLine, setVoiceLine] = useState<string | null>(null);
   const [toast, setToast] = useState<{ text: string; err?: boolean } | null>(null);
@@ -201,6 +211,7 @@ export default function App() {
           onFocus={setFocus}
           onTranscript={setTranscript}
           onCall={callParticipant}
+          onAdd={() => setAddingWitness(true)}
         />
 
         <main className="stage">
@@ -214,6 +225,9 @@ export default function App() {
                 {t.label}
                 {t.id === "contradictions" && c.contradictions > 0 && (
                   <span className="tab-badge bad">{c.contradictions}</span>
+                )}
+                {t.id === "questions" && state.followUps.length > 0 && (
+                  <span className="tab-badge">{state.followUps.length}</span>
                 )}
                 {t.id === "timeline" && state.timeline.length > 0 && (
                   <span className="tab-badge">{state.timeline.length}</span>
@@ -263,6 +277,15 @@ export default function App() {
                     onAskNext={askNext}
                   />
                 )}
+                {tab === "questions" && (
+                  <Questions
+                    state={state}
+                    meta={meta}
+                    onNotify={notify}
+                    onCall={callParticipant}
+                    onAddWitness={() => setAddingWitness(true)}
+                  />
+                )}
                 {tab === "evidence" && <EvidenceView state={state} />}
                 {tab === "report" && <ReportView state={state} />}
               </motion.div>
@@ -296,6 +319,28 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {addingWitness && (
+        <div className="backdrop" onClick={() => setAddingWitness(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <span>Add witness to {inc?.referenceId ?? "this case"}</span>
+              <button className="icon-btn" onClick={() => setAddingWitness(false)}>
+                ✕
+              </button>
+            </div>
+            <div className="modal-body">
+              <AddWitnessForm
+                onDone={(name) => {
+                  setAddingWitness(false);
+                  notify(`${name} added to the case`);
+                }}
+                onError={(m) => notify(m, true)}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {transcript && (
         <TranscriptModal

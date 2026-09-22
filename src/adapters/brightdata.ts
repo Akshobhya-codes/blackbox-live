@@ -49,7 +49,22 @@ async function getClient(): Promise<McpClient | null> {
         },
       });
 
+      // The MCP server is a child process on a stdio pipe. If it exits while a
+      // response is in flight — or the host shuts down mid-request — the pipe
+      // raises EPIPE as an *unhandled* error event, which takes the whole
+      // process down. A research call failing must never kill an investigation
+      // that is mid-interview, so every transport error is absorbed here.
+      const swallow = (err: unknown) => {
+        console.warn("[brightdata] transport error:", (err as Error)?.message ?? err);
+      };
+      transport.onerror = swallow;
+      transport.onclose = () => {
+        console.warn("[brightdata] MCP session closed; will reconnect on next use");
+        clientPromise = null;
+      };
+
       const client = new Client({ name: "blackbox", version: "1.0.0" }, { capabilities: {} });
+      client.onerror = swallow;
       await client.connect(transport);
       console.log("[brightdata] MCP session established");
       return client as unknown as McpClient;

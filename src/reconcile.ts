@@ -4,7 +4,16 @@
 // It reports what is corroborated, what genuinely conflicts, what only one
 // person said, and what an investigator should ask next.
 
-import { EVENTS, EXCLUSIVE_PREDICATES, entityLabel, eventLabel, eventNoun } from "./lexicon.ts";
+import {
+  EVENTS,
+  EXCLUSIVE_PREDICATES,
+  entityLabel,
+  eventLabel,
+  eventNoun,
+  eventPhase,
+  eventMateriality,
+  attributeMateriality,
+} from "./lexicon.ts";
 import { formatClock, parseClockTime } from "./normalize.ts";
 import { detectJointImpossibilities } from "./jointRules.ts";
 import type { Claim, Finding, Incident, TimelineEvent, Witness } from "./types.ts";
@@ -15,6 +24,32 @@ const TIME_AGREEMENT_TOLERANCE_MIN = 5;
 const TIME_CONFLICT_THRESHOLD_MIN = 15;
 
 const EVENT_KEYS = new Set(EVENTS.map((e) => e.key));
+
+/** Plain-English names for conditions at the scene. */
+const ENV_LABEL: Record<string, string> = {
+  "conditions.surface": "Road surface",
+  "weather.condition": "Weather",
+  "visibility.ambient": "Light level",
+};
+
+/**
+ * How to actually ask about conditions on a call.
+ *
+ * These matter more than most gaps: they bear on braking distance and on what
+ * a witness could plausibly have seen, and unlike the rest of an account a
+ * weather record can settle them outright.
+ */
+const ENV_PROMPTS: Record<string, string> = {
+  "conditions.surface": "Was the road surface wet or dry where it happened?",
+  "weather.condition":
+    "What was the weather doing at the time — raining, clear, foggy, something else?",
+  "visibility.ambient":
+    "How was the light at that point — was it dark, or was there still daylight?",
+};
+
+function attributeLabel(subject: string, predicate: string): string {
+  return ENV_LABEL[subject + "." + predicate] ?? `${predicate}: ${entityLabel(subject)}`;
+}
 
 /**
  * Open sensory prompts, safe to read to a witness who has not mentioned the
@@ -37,6 +72,19 @@ const SAFE_PROMPTS: Record<string, string> = {
   steam: "Did you see any steam, smoke, or vapour?",
   pedestrian_present: "Did you see anyone on foot in or near the crossing?",
   airbag: "Did you notice whether any airbags deployed?",
+  vehicle_approach: "Which directions were the vehicles travelling, as far as you could tell?",
+  entered_intersection: "Which vehicle entered the intersection first, if you could tell?",
+  signal_change: "Did you see the traffic signal change at any point?",
+  swerve: "Did either vehicle swerve or change course before they met?",
+  acceleration: "Did either vehicle speed up or slow down beforehand?",
+  spin: "After the impact, did either vehicle spin or get pushed round?",
+  came_to_rest: "Where did the vehicles end up after it happened?",
+  debris: "Was there any debris or broken glass on the road?",
+  exited_vehicle: "Did anyone get out of the vehicles, and how soon?",
+  injury_observed: "Did anyone appear hurt to you?",
+  emergency_services: "Did police or an ambulance arrive while you were there?",
+  called_emergency: "Did you see anyone call for help?",
+  bystanders: "Did other people come over to the scene?",
 };
 
 export interface ReconciliationResult {
@@ -99,6 +147,9 @@ export function reconcile(
     const sample = group[0];
     // Narrative-position claims are internal ordering evidence, not findings.
     if (sample.category === "narrative") continue;
+    // An opinion is not evidence: it corroborates nothing and contradicts
+    // nothing. Two witnesses blaming the same driver is not corroboration.
+    if (sample.category === "inference") continue;
 
     const byWitness = new Map<string, Claim[]>();
     for (const c of group) {
@@ -293,7 +344,7 @@ export function reconcile(
           id: newId("fnd"),
           incidentId: incident.id,
           type: "contradiction",
-          title: `Conflicting ${sample.predicate}: ${entityLabel(sample.subject)}`,
+          title: `Conflicting ${attributeLabel(sample.subject, sample.predicate)}`,
           explanation:
             [...values.entries()]
               .map(([v, ws]) => `${ws.map(name).join(" and ")} described it as ${v}`)
@@ -302,9 +353,12 @@ export function reconcile(
           involvedWitnessIds: [...byWitness.keys()],
           sourceClaimIds: group.map((c) => c.id),
           followUpQuestion:
-            sample.predicate === "color"
+            // Conditions get their own phrasing; the generic template reads as
+            // nonsense for them ("what surface was the conditions").
+            ENV_PROMPTS[`${sample.subject}.${sample.predicate}`] ??
+            (sample.predicate === "color"
               ? `What ${sample.predicate} was the ${lower(entityLabel(sample.subject))}, and what were the lighting conditions where you were standing?`
-              : `What ${sample.predicate} was the ${lower(entityLabel(sample.subject))} from where you were standing?`,
+              : `What ${sample.predicate} was the ${lower(entityLabel(sample.subject))} from where you were standing?`),
         });
       } else if (
         values.size === 1 &&
@@ -480,22 +534,35 @@ function openQuestions(
       EVENT_KEYS.has(claim.subject)
     ) {
       title = `Did any other witness observe ${eventNoun(claim.subject)}?`;
-      prompt = SAFE_PROMPTS[claim.subject];
-      priority = 3;
+      // Recorded either way; only asked aloud when it bears on the case.
+      const weight = eventMateriality(claim.subject);
+      prompt = weight >= 2 ? SAFE_PROMPTS[claim.subject] : undefined;
+      priority = 5 - weight;
     } else if (claim.category === "attribute" && EXCLUSIVE_PREDICATES.has(claim.predicate)) {
       const thing = lower(entityLabel(claim.subject));
-      title = `Can another witness describe the ${claim.predicate} of the ${thing}?`;
-      priority = 1;
+      const topic = `${claim.subject}.${claim.predicate}`;
+      title =
+        ENV_LABEL[topic] !== undefined
+          ? `Can another witness confirm the ${lower(ENV_LABEL[topic])}?`
+          : `Can another witness describe the ${claim.predicate} of the ${thing}?`;
+      priority = 4 - attributeMateriality(claim.subject, claim.predicate);
+      // Conditions need their own phrasing — the generic template produces
+      // nonsense like "what surface was the conditions".
       prompt =
-        claim.predicate === "color"
+        ENV_PROMPTS[topic] ??
+        (claim.predicate === "color"
           ? `What colour was the ${thing}, and what were the lighting conditions where you were standing?`
           : claim.predicate === "direction"
             ? `Which direction was the ${thing} moving, from where you were standing?`
-            : `How would you describe the ${claim.predicate} of the ${thing}?`;
+            : `How would you describe the ${claim.predicate} of the ${thing}?`);
     } else if (claim.category === "temporal_order") {
       title = `Can another witness place ${eventNoun(claim.subject)} relative to ${eventNoun(claim.object)}?`;
-      prompt = `Did ${eventNoun(claim.subject)} happen before or after ${eventNoun(claim.object)}?`;
-      priority = 2;
+      const weight = Math.min(eventMateriality(claim.subject), eventMateriality(claim.object));
+      prompt =
+        weight >= 2
+          ? `Did ${eventNoun(claim.subject)} happen before or after ${eventNoun(claim.object)}?`
+          : undefined;
+      priority = 5 - weight;
     }
 
     if (!title || !prompt) continue;
@@ -589,7 +656,15 @@ function buildTimeline(
         pos: meanPosition(key),
       };
     })
-    .sort((a, b) => a.s - b.s || a.pos - b.pos || a.key.localeCompare(b.key));
+    // Canonical phase first, then what witnesses actually said about order,
+    // then where it fell in their narration.
+    .sort(
+      (a, b) =>
+        eventPhase(a.key) - eventPhase(b.key) ||
+        a.s - b.s ||
+        a.pos - b.pos ||
+        a.key.localeCompare(b.key),
+    );
 
   return events.map((e, i) => ({
     id: newId("tl"),

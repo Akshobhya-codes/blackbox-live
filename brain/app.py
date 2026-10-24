@@ -322,23 +322,88 @@ class StrandsAdapter:
             self.error = f"strands not installed: {type(exc).__name__}"
             return
 
-        key = os.getenv("OPENAI_API_KEY")
-        if not key:
-            self.available = False
-            self.error = "strands installed but no OPENAI_API_KEY for a model provider"
-            return
+        self.model, self.provider, self.error = self._build_model()
+        self.available = self.model is not None
 
+    @staticmethod
+    def _build_model() -> tuple[Any, str, str | None]:
+        """Binds the Report Agent to a model provider.
+
+        OpenAI is the backbone and runs the report by default. Amazon Bedrock
+        is wired as a real second provider: Strands is AWS's agent SDK and
+        Bedrock is its native backend, so the same agent, system prompt and
+        Pydantic schema run unchanged on either. If OpenAI is missing or fails
+        to construct, the report is generated on Bedrock instead.
+
+        Set STRANDS_PROVIDER=bedrock to make Bedrock primary - useful for
+        demonstrating the Bedrock path directly rather than by taking the
+        failover on trust. Whichever provider is bound is returned by /health
+        and recorded on the report, so the origin is always checkable.
+
+        Only the report is affected. Claim extraction and contradiction
+        analysis stay on OpenAI in the Node process either way.
+        """
+        preferred = os.getenv("STRANDS_PROVIDER", "openai").strip().lower()
+        order = ["bedrock", "openai"] if preferred == "bedrock" else ["openai", "bedrock"]
+
+        errors: list[str] = []
+        for provider in order:
+            model, label, err = (
+                StrandsAdapter._build_bedrock()
+                if provider == "bedrock"
+                else StrandsAdapter._build_openai()
+            )
+            if model is not None:
+                return model, label, None
+            errors.append(f"{provider}: {err}")
+
+        return None, "none", "; ".join(errors)
+
+    @staticmethod
+    def _build_openai() -> tuple[Any, str, str | None]:
+        key = os.getenv("OPENAI_API_KEY", "").strip()
+        if not key:
+            return None, "none", "no OPENAI_API_KEY"
         try:
             from strands.models.openai import OpenAIModel  # type: ignore
 
-            self.model = OpenAIModel(
-                client_args={"api_key": key},
-                model_id=os.getenv("OPENAI_MODEL", "gpt-4o"),
+            model_id = os.getenv("OPENAI_MODEL", "gpt-4o")
+            return (
+                OpenAIModel(client_args={"api_key": key}, model_id=model_id),
+                f"openai:{model_id}",
+                None,
             )
-            self.provider = f"openai:{os.getenv('OPENAI_MODEL', 'gpt-4o')}"
         except Exception as exc:
-            self.available = False
-            self.error = f"no usable Strands model provider: {type(exc).__name__}: {exc}"
+            return None, "none", f"{type(exc).__name__}: {exc}"
+
+    @staticmethod
+    def _build_bedrock() -> tuple[Any, str, str | None]:
+        """Amazon Bedrock via Strands' native provider.
+
+        Accepts either a Bedrock API key (bearer token) or ordinary SigV4
+        credentials, whichever the environment supplies.
+        """
+        api_key = os.getenv("AWS_BEDROCK_API_KEY", "").strip()
+        sigv4 = bool(
+            os.getenv("AWS_ACCESS_KEY_ID", "").strip()
+            and os.getenv("AWS_SECRET_ACCESS_KEY", "").strip()
+        )
+        if not (api_key or sigv4):
+            return None, "none", "no AWS credentials"
+
+        try:
+            from strands.models import BedrockModel  # type: ignore
+
+            model_id = os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-6")
+            kwargs: dict[str, Any] = {
+                "model_id": model_id,
+                "region_name": os.getenv("AWS_REGION", "us-west-2"),
+            }
+            if api_key:
+                kwargs["api_key"] = api_key
+            return BedrockModel(**kwargs), f"bedrock:{model_id}", None
+        except Exception as exc:
+            return None, "none", f"{type(exc).__name__}: {exc}"
 
     @property
     def mode(self) -> Mode:
